@@ -1,0 +1,103 @@
+services:
+  carlens-api:
+    build:
+      context: .
+      dockerfile: src/Carlens.Api/Dockerfile
+    container_name: carlens-api
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=carlensai;Username=carlens;Password=carlens
+      Redis__ConnectionString: redis:6379
+      RabbitMQ__HostName: rabbitmq
+      Security__InternalApiKey: ${CARLENS_INTERNAL_API_KEY:-}
+    ports:
+      - "127.0.0.1:5000:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  carlens-web:
+    build:
+      context: .
+      dockerfile: src/Carlens.Web/Dockerfile
+    container_name: carlens-web
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      CarlensApi__BaseUrl: http://carlens-api:8080
+      Security__InternalApiKey: ${CARLENS_INTERNAL_API_KEY:-}
+    ports:
+      - "127.0.0.1:5001:8080"
+    depends_on:
+      - carlens-api
+
+  carlens-aiworker:
+    build:
+      context: .
+      dockerfile: src/Carlens.AiWorker/Dockerfile
+    container_name: carlens-aiworker
+    init: true
+    ipc: host
+    environment:
+      DOTNET_ENVIRONMENT: Development
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=carlensai;Username=carlens;Password=carlens
+      Redis__ConnectionString: redis:6379
+      RabbitMQ__HostName: rabbitmq
+      OpenAI__ApiKey: ${OPENAI_API_KEY:-}
+      ListingSource__Headless: "false"
+      ListingSource__MaxComparables: "20"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:18
+    container_name: carlens-postgres
+    environment:
+      POSTGRES_DB: carlensai
+      POSTGRES_USER: carlens
+      POSTGRES_PASSWORD: carlens
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U carlens -d carlensai"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:8-alpine
+    container_name: carlens-redis
+    ports:
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    container_name: carlens-rabbitmq
+    ports:
+      - "127.0.0.1:5673:5672"
+      - "127.0.0.1:15673:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 8s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  postgres-data:

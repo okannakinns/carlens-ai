@@ -1,0 +1,119 @@
+# -----------------------------------------------------------------------------
+# .NET build outputs and test artifacts
+# -----------------------------------------------------------------------------
+**/bin/
+**/obj/
+artifacts/
+publish/
+*.nupkg
+*.snupkg
+TestResults/
+**/TestResults/
+coverage/
+**/coverage/
+coverage.*
+*.coverage
+*.coveragexml
+*.trx
+
+# -----------------------------------------------------------------------------
+# Visual Studio, VS Code, Rider and user-specific project state
+# -----------------------------------------------------------------------------
+.vs/
+.vscode/
+.idea/
+.fleet/
+*.user
+*.suo
+*.rsuser
+*.userosscache
+*.sln.docstates
+*.DotSettings.user
+*.csproj.user
+*.http.user
+
+# -----------------------------------------------------------------------------
+# Node.js, pnpm, Vite and generated React output
+# -----------------------------------------------------------------------------
+**/node_modules/
+**/dist/
+**/.vite/
+.pnpm-store/
+.npm/
+.yarn/
+*.tsbuildinfo
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# React is built into this directory by Vite/Docker.
+src/Carlens.Web/wwwroot/
+
+# -----------------------------------------------------------------------------
+# Playwright outputs
+# -----------------------------------------------------------------------------
+playwright-report/
+test-results/
+blob-report/
+playwright/.cache/
+
+# -----------------------------------------------------------------------------
+# Local secrets and environment overrides
+# -----------------------------------------------------------------------------
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+
+secrets.json
+**/secrets.json
+**/appsettings.Local.json
+**/appsettings.*.Local.json
+**/appsettings.local.json
+**/appsettings.*.local.json
+
+*.pfx
+*.p12
+*.pem
+*.key
+credentials*.json
+service-account*.json
+
+# Keep developer-only Docker overrides out of the public repository.
+docker-compose.override.yml
+docker-compose.*.override.yml
+
+# -----------------------------------------------------------------------------
+# Runtime files, local databases and logs
+# -----------------------------------------------------------------------------
+.run/
+logs/
+*.log
+*.pid
+*.pid.lock
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# -----------------------------------------------------------------------------
+# Operating system and temporary files
+# -----------------------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~

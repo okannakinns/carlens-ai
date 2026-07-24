@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Carlens.AiWorker/Carlens.AiWorker.csproj" />
+    <Project Path="src/Carlens.Api/Carlens.Api.csproj" />
+    <Project Path="src/Carlens.Application/Carlens.Application.csproj" />
+    <Project Path="src/Carlens.Contracts/Carlens.Contracts.csproj" />
+    <Project Path="src/Carlens.Domain/Carlens.Domain.csproj" />
+    <Project Path="src/Carlens.Infrastructure/Carlens.Infrastructure.csproj" />
+    <Project Path="src/Carlens.Web/Carlens.Web.csproj" />
+  </Folder>
+  <Folder Name="/test/">
+    <Project Path="test/Carlens.Tests/Carlens.Tests.csproj" />
+  </Folder>
+</Solution>
