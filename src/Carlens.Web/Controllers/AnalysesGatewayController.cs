@@ -4,7 +4,6 @@ using Carlens.Contracts.Responses;
 using Carlens.Web.Security;
 using Carlens.Web.Services;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.RateLimiting;
 
 namespace Carlens.Web.Controllers;
 
@@ -82,7 +81,7 @@ public sealed class AnalysesGatewayController : ControllerBase
 
     [HttpPost]
     [ValidateAntiForgeryToken]
-    [EnableRateLimiting(SecurityPolicyNames.AnalysisCreation)]
+    [AnalysisRateLimit]
     [RequestSizeLimit(MaximumUrlRequestSizeBytes)]
     public async Task<ActionResult<ListingAnalysisResponse>> CreateAsync(
         CreateListingAnalysisRequest request,
@@ -122,7 +121,7 @@ public sealed class AnalysesGatewayController : ControllerBase
 
     [HttpPost("manual")]
     [ValidateAntiForgeryToken]
-    [EnableRateLimiting(SecurityPolicyNames.AnalysisCreation)]
+    [AnalysisRateLimit]
     [Consumes("multipart/form-data")]
     [RequestFormLimits(MultipartBodyLengthLimit = MaximumManualRequestSizeBytes)]
     [RequestSizeLimit(MaximumManualRequestSizeBytes)]
