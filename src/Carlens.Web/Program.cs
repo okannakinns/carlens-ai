@@ -2,12 +2,14 @@ using System.Threading.RateLimiting;
 using Carlens.Web.Middlewares;
 using Carlens.Web.Security;
 using Carlens.Web.Services;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllersWithViews();
+builder.Services.AddHealthChecks();
 builder.Services.AddAntiforgery(options =>
 {
     options.HeaderName = "X-CSRF-TOKEN";
@@ -104,6 +106,19 @@ builder.Services.AddHttpClient<IListingAnalysisApiClient, ListingAnalysisApiClie
     .AddHttpMessageHandler<InternalApiKeyHandler>();
 
 var app = builder.Build();
+
+app.UseHealthChecks(
+    "/health/live",
+    new HealthCheckOptions
+    {
+        Predicate = _ => false
+    });
+app.UseHealthChecks(
+    "/health/ready",
+    new HealthCheckOptions
+    {
+        Predicate = registration => registration.Tags.Contains("ready")
+    });
 
 if (!app.Environment.IsDevelopment())
 {
