@@ -2,12 +2,20 @@ using Carlens.Application.Extensions;
 using Carlens.Api.Middlewares;
 using Carlens.Api.Security;
 using Carlens.Infrastructure.Extensions;
-
+using Carlens.Infrastructure.Persistence;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddApplicationServices();
 builder.Services.AddInfrastructureServices(builder.Configuration);
+builder.Services
+    .AddHealthChecks()
+    .AddDbContextCheck<CarlensDbContext>(
+        name: "postgres",
+        failureStatus: HealthStatus.Unhealthy,
+        tags: ["ready"]);
 
 builder.Services.AddControllers();
 builder.Services.AddOpenApi();
@@ -24,6 +32,19 @@ if (!builder.Environment.IsDevelopment() &&
 builder.Services.AddSingleton(new InternalApiSecurityOptions(internalApiKey));
 
 var app = builder.Build();
+
+app.UseHealthChecks(
+    "/health/live",
+    new HealthCheckOptions
+    {
+        Predicate = _ => false
+    });
+app.UseHealthChecks(
+    "/health/ready",
+    new HealthCheckOptions
+    {
+        Predicate = registration => registration.Tags.Contains("ready")
+    });
 
 app.UseMiddleware<ExceptionHandlingMiddleware>();
 app.UseMiddleware<InternalApiKeyMiddleware>();
