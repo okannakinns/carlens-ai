@@ -1,10 +1,14 @@
 using System.Threading.RateLimiting;
+using Carlens.Web.HealthChecks;
 using Carlens.Web.Middlewares;
 using Carlens.Web.Security;
 using Carlens.Web.Services;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
+using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -18,9 +22,46 @@ if (string.IsNullOrWhiteSpace(redisConnectionString))
 
 var redisInstanceName =
     builder.Configuration["Redis:InstanceName"] ?? "carlens:web:";
+var dataProtectionApplicationName =
+    builder.Configuration["DataProtection:ApplicationName"];
+
+if (string.IsNullOrWhiteSpace(dataProtectionApplicationName))
+{
+    throw new InvalidOperationException(
+        "DataProtection:ApplicationName configuration is missing.");
+}
+
+var dataProtectionKeyRingKeyPrefix =
+    builder.Configuration["DataProtection:KeyRingKeyPrefix"];
+
+if (string.IsNullOrWhiteSpace(dataProtectionKeyRingKeyPrefix))
+{
+    throw new InvalidOperationException(
+        "DataProtection:KeyRingKeyPrefix configuration is missing.");
+}
+
+var environmentName = builder.Environment.EnvironmentName;
+var dataProtectionApplicationDiscriminator =
+    $"{dataProtectionApplicationName}:{environmentName}";
+var dataProtectionKeyRingKey =
+    $"{dataProtectionKeyRingKeyPrefix}:{environmentName.ToLowerInvariant()}";
+
+var redisConfiguration = ConfigurationOptions.Parse(redisConnectionString);
+redisConfiguration.AbortOnConnectFail = false;
+redisConfiguration.ClientName ??= "carlens-web";
+
+var redisConnection = new Lazy<IConnectionMultiplexer>(
+    () => ConnectionMultiplexer.Connect(redisConfiguration));
 
 builder.Services.AddControllersWithViews();
-builder.Services.AddHealthChecks();
+builder.Services.AddSingleton<IConnectionMultiplexer>(
+    _ => redisConnection.Value);
+builder.Services
+    .AddHealthChecks()
+    .AddCheck<RedisHealthCheck>(
+        name: "redis",
+        failureStatus: HealthStatus.Unhealthy,
+        tags: ["ready"]);
 builder.Services.AddAntiforgery(options =>
 {
     options.HeaderName = "X-CSRF-TOKEN";
@@ -30,9 +71,16 @@ builder.Services.AddAntiforgery(options =>
     options.Cookie.SameSite = SameSiteMode.Strict;
     options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
 });
+builder.Services
+    .AddDataProtection()
+    .SetApplicationName(dataProtectionApplicationDiscriminator)
+    .PersistKeysToStackExchangeRedis(
+        () => redisConnection.Value.GetDatabase(),
+        dataProtectionKeyRingKey);
 builder.Services.AddStackExchangeRedisCache(options =>
 {
-    options.Configuration = redisConnectionString;
+    options.ConnectionMultiplexerFactory =
+        () => Task.FromResult(redisConnection.Value);
     options.InstanceName = redisInstanceName;
 });
 builder.Services.AddSession(options =>

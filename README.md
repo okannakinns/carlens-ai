@@ -89,7 +89,7 @@ flowchart LR
     U["👤 Kullanıcı"] --> SPA["⚛️ React SPA"]
     SPA --> BFF["🌐 ASP.NET Core Web / BFF"]
     BFF -->|"HTTP + dahili servis anahtarı"| API["🧩 ASP.NET Core API"]
-    BFF -->|"Dağıtılmış kullanıcı oturumu"| REDIS[("⚡ Redis")]
+    BFF -->|"Oturum + Data Protection key ring"| REDIS[("⚡ Redis")]
 
     API --> DB[("🐘 PostgreSQL")]
     API -->|"24 saatlik atomik rezervasyon"| REDIS[("⚡ Redis")]
@@ -156,7 +156,7 @@ Projede CQRS için gereksiz bir framework bağımlılığı eklenmemiş, handler
 | **EF Core 10** | ORM, entity konfigürasyonları ve migration yönetimi | Domain modellerini ilişkisel şemaya kontrollü biçimde eşlemek ve şema değişikliklerini versiyonlamak |
 | **RabbitMQ 4** | Analiz istek kuyruğu | Uzun süren ilan okuma ve AI çağrılarını HTTP isteğinden ayırmak; dayanıklı kuyruk ve manuel `ack/nack` ile güvenilir tüketim |
 | **Worker Service** | Kuyruktaki analizlerin arka planda işlenmesi | API’nin hızlı cevap vermesini ve AI iş yükünün bağımsız ölçeklenebilmesini sağlamak |
-| **Redis 8** | Yinelenen analiz koruması ve dağıtılmış Web session depolaması | Atomik `SET NX` ile tekrar AI maliyetini önlemek ve Web replikaları arasında kullanıcı oturumunu paylaşmak |
+| **Redis 8** | Yinelenen analiz koruması, dağıtılmış session ve Data Protection key ring | Tekrar AI maliyetini önlemek; Web replikaları arasında oturum, antiforgery ve cookie anahtarlarını paylaşmak |
 | **Microsoft Playwright** | JavaScript ile oluşturulan ilan verisini okumak | Dinamik sayfalarda gerçek tarayıcı davranışıyla güvenilir veri toplamak; container içinde Xvfb ile kullanıcıya pencere göstermeden çalışmak |
 | **OpenAI Responses API** | Metin ve görsellerden yapılandırılmış araç raporu üretmek | Çok modlu analiz, JSON Schema ile öngörülebilir çıktı ve maliyet/kullanım metriklerinin takip edilebilmesi |
 | **Recharts** | Piyasa ve güven grafiklerinin çizimi | React ile uyumlu, responsive ve bileşen tabanlı veri görselleştirme |
@@ -189,12 +189,13 @@ Bu repository herkese açık yayımlanabilecek şekilde tasarlanmıştır:
 - Servis anahtarı sabit zamanda karşılaştırılır; başarısız istekler `401 Unauthorized` alır.
 - Analiz oluşturan isteklerde antiforgery token doğrulaması ve IP bazlı rate limit bulunur.
 - Analiz ve görsel erişimi `HttpOnly` ve `SameSite=Strict` oturumu üzerinden sınırlandırılır.
+- Web session verisi ve ortam bazında izole edilen Data Protection key ring Redis üzerinde replikalar arasında paylaşılır.
 - CSP, frame engelleme, MIME sniffing koruması, referrer ve permissions policy başlıkları uygulanır.
 - URL istekleri ve fotoğraf yüklemeleri için ayrı request boyutu sınırları vardır.
 - Docker geliştirme portları yalnızca `127.0.0.1` üzerinde yayımlanır.
 
 > [!NOTE]
-> Mevcut oturum deposu ve rate limiter tek instance’lı demo/geliştirme ortamı için bellektedir. Çok instance’lı production dağıtımında kullanıcı kimlik doğrulaması, dağıtık oturum ve dağıtık rate limit uygulanmalıdır.
+> Docker Compose ortamında Redis AOF kalıcılığı açıktır. Production dağıtımında managed Redis, TLS ve Data Protection anahtarlarını Key Vault ile sarmalama kullanılmalıdır. IP bazlı rate limiter hâlen instance yerelidir; çok replikalı dağıtım öncesinde dağıtık kota politikasına taşınacaktır.
 
 ## 📁 Solution Yapısı
 
@@ -351,7 +352,7 @@ GitHub Actions her push ve pull request’te .NET build/test ile React build ad�
 - Clean Architecture ile framework’ten bağımsız iş kuralları
 - CQRS tabanlı use case tasarımı ve FluentValidation
 - RabbitMQ ile event-driven, asenkron iş akışı
-- Redis ile atomik idempotency ve replikalar arası dağıtılmış session yönetimi
+- Redis ile atomik idempotency, dağıtılmış session ve paylaşılan Data Protection key ring yönetimi
 - PostgreSQL, EF Core configuration ve migration yönetimi
 - OpenAI ile çok modlu ve JSON Schema tabanlı yapılandırılmış çıktı
 - Playwright ile dinamik web verisi okuma
@@ -366,7 +367,7 @@ GitHub Actions her push ve pull request’te .NET build/test ile React build ad�
 - Kullanıcı bazlı kredi/kota ve abonelik yönetimi
 - Resmî erişim sağlanan ek ilan kaynakları
 - Kaydedilebilir ve paylaşılabilir analiz raporları
-- Dağıtık session ve rate limiting
+- Kullanıcı bazlı dağıtık rate limiting ve kota politikaları
 - Retry politikası, dead-letter queue ve gelişmiş mesaj gözlemlenebilirliği
 - OpenTelemetry, merkezi loglama, metrik ve alarm altyapısı
 - Production ortamı için managed secret store, TLS ve otomatik deployment
