@@ -30,11 +30,15 @@ services:
       ASPNETCORE_ENVIRONMENT: Development
       ASPNETCORE_URLS: http://+:8080
       CarlensApi__BaseUrl: http://carlens-api:8080
+      Redis__ConnectionString: redis:6379
       Security__InternalApiKey: ${CARLENS_INTERNAL_API_KEY:-}
     ports:
       - "127.0.0.1:5001:8080"
     depends_on:
-      - carlens-api
+      carlens-api:
+        condition: service_started
+      redis:
+        condition: service_healthy
 
   carlens-aiworker:
     build:

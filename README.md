@@ -89,6 +89,7 @@ flowchart LR
     U["👤 Kullanıcı"] --> SPA["⚛️ React SPA"]
     SPA --> BFF["🌐 ASP.NET Core Web / BFF"]
     BFF -->|"HTTP + dahili servis anahtarı"| API["🧩 ASP.NET Core API"]
+    BFF -->|"Dağıtılmış kullanıcı oturumu"| REDIS[("⚡ Redis")]
 
     API --> DB[("🐘 PostgreSQL")]
     API -->|"24 saatlik atomik rezervasyon"| REDIS[("⚡ Redis")]
@@ -155,7 +156,7 @@ Projede CQRS için gereksiz bir framework bağımlılığı eklenmemiş, handler
 | **EF Core 10** | ORM, entity konfigürasyonları ve migration yönetimi | Domain modellerini ilişkisel şemaya kontrollü biçimde eşlemek ve şema değişikliklerini versiyonlamak |
 | **RabbitMQ 4** | Analiz istek kuyruğu | Uzun süren ilan okuma ve AI çağrılarını HTTP isteğinden ayırmak; dayanıklı kuyruk ve manuel `ack/nack` ile güvenilir tüketim |
 | **Worker Service** | Kuyruktaki analizlerin arka planda işlenmesi | API’nin hızlı cevap vermesini ve AI iş yükünün bağımsız ölçeklenebilmesini sağlamak |
-| **Redis 8** | Aynı ilan için yinelenen analiz koruması | Atomik `SET NX` ve süre sonu ile yarış durumuna girmeden tekrar AI maliyetini önlemek |
+| **Redis 8** | Yinelenen analiz koruması ve dağıtılmış Web session depolaması | Atomik `SET NX` ile tekrar AI maliyetini önlemek ve Web replikaları arasında kullanıcı oturumunu paylaşmak |
 | **Microsoft Playwright** | JavaScript ile oluşturulan ilan verisini okumak | Dinamik sayfalarda gerçek tarayıcı davranışıyla güvenilir veri toplamak; container içinde Xvfb ile kullanıcıya pencere göstermeden çalışmak |
 | **OpenAI Responses API** | Metin ve görsellerden yapılandırılmış araç raporu üretmek | Çok modlu analiz, JSON Schema ile öngörülebilir çıktı ve maliyet/kullanım metriklerinin takip edilebilmesi |
 | **Recharts** | Piyasa ve güven grafiklerinin çizimi | React ile uyumlu, responsive ve bileşen tabanlı veri görselleştirme |
@@ -350,7 +351,7 @@ GitHub Actions her push ve pull request’te .NET build/test ile React build ad�
 - Clean Architecture ile framework’ten bağımsız iş kuralları
 - CQRS tabanlı use case tasarımı ve FluentValidation
 - RabbitMQ ile event-driven, asenkron iş akışı
-- Redis ile atomik idempotency/yinelenen işlem koruması
+- Redis ile atomik idempotency ve replikalar arası dağıtılmış session yönetimi
 - PostgreSQL, EF Core configuration ve migration yönetimi
 - OpenAI ile çok modlu ve JSON Schema tabanlı yapılandırılmış çıktı
 - Playwright ile dinamik web verisi okuma
