@@ -29,6 +29,7 @@ public sealed class WebHealthCheckTests
             builder
                 .UseEnvironment("Production")
                 .UseSetting("CarlensApi:BaseUrl", "http://localhost:5200")
+                .UseSetting("Redis:ConnectionString", "redis.test:6379")
                 .UseSetting(
                     "Security:InternalApiKey",
                     "carlens-health-check-tests-internal-key");
