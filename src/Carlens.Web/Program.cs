@@ -1,12 +1,9 @@
-using System.Threading.RateLimiting;
 using Carlens.Web.HealthChecks;
 using Carlens.Web.Middlewares;
 using Carlens.Web.Security;
 using Carlens.Web.Services;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using StackExchange.Redis;
 
@@ -114,43 +111,22 @@ var analysisWindowMinutes = Math.Clamp(
         "Security:AnalysisRateLimit:WindowMinutes") ?? 15,
     1,
     1440);
+var analysisRateLimitKeyPrefix =
+    builder.Configuration["Security:AnalysisRateLimit:KeyPrefix"];
 
-builder.Services.AddRateLimiter(options =>
+if (string.IsNullOrWhiteSpace(analysisRateLimitKeyPrefix))
 {
-    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
-    options.AddPolicy(
-        SecurityPolicyNames.AnalysisCreation,
-        context => RateLimitPartition.GetFixedWindowLimiter(
-            context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-            _ => new FixedWindowRateLimiterOptions
-            {
-                PermitLimit = analysisPermitLimit,
-                Window = TimeSpan.FromMinutes(analysisWindowMinutes),
-                QueueLimit = 0,
-                AutoReplenishment = true
-            }));
-    options.OnRejected = async (context, cancellationToken) =>
-    {
-        if (context.Lease.TryGetMetadata(
-                MetadataName.RetryAfter,
-                out var retryAfter))
-        {
-            context.HttpContext.Response.Headers.RetryAfter =
-                Math.Ceiling(retryAfter.TotalSeconds).ToString();
-        }
+    throw new InvalidOperationException(
+        "Security:AnalysisRateLimit:KeyPrefix configuration is missing.");
+}
 
-        await context.HttpContext.Response.WriteAsJsonAsync(
-            new ProblemDetails
-            {
-                Status = StatusCodes.Status429TooManyRequests,
-                Title = "Çok fazla analiz isteği",
-                Detail =
-                    $"Bu bağlantı için {analysisWindowMinutes} dakika içinde " +
-                    $"en fazla {analysisPermitLimit} analiz oluşturabilirsiniz."
-            },
-            cancellationToken);
-    };
-});
+var analysisRateLimitOptions = new AnalysisRateLimitOptions(
+    analysisPermitLimit,
+    TimeSpan.FromMinutes(analysisWindowMinutes),
+    $"{analysisRateLimitKeyPrefix}:{environmentName.ToLowerInvariant()}");
+
+builder.Services.AddSingleton(analysisRateLimitOptions);
+builder.Services.AddSingleton<IAnalysisRateLimiter, RedisAnalysisRateLimiter>();
 builder.Services.AddResponseCompression();
 builder.Services.AddHttpClient<IListingAnalysisApiClient, ListingAnalysisApiClient>(
     client =>
@@ -195,7 +171,6 @@ app.UseResponseCompression();
 app.UseDefaultFiles();
 app.UseStaticFiles();
 app.UseSession();
-app.UseRateLimiter();
 app.MapControllers();
 app.MapFallbackToFile("index.html");
 

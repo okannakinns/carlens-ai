@@ -1,4 +1,5 @@
 using Carlens.Web.Controllers;
+using Carlens.Web.Security;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using Microsoft.AspNetCore.DataProtection.StackExchangeRedis;
@@ -50,6 +51,28 @@ public sealed class RedisWebConfigurationTests
     }
 
     [Fact]
+    public void Web_RegistersDistributedAnalysisRateLimiting()
+    {
+        using var factory = new WebFactory();
+        using var scope = factory.Services.CreateScope();
+
+        var options = scope.ServiceProvider
+            .GetRequiredService<AnalysisRateLimitOptions>();
+        var firstLimiter = scope.ServiceProvider
+            .GetRequiredService<IAnalysisRateLimiter>();
+        var secondLimiter = scope.ServiceProvider
+            .GetRequiredService<IAnalysisRateLimiter>();
+
+        Assert.Equal(5, options.PermitLimit);
+        Assert.Equal(TimeSpan.FromMinutes(15), options.Window);
+        Assert.Equal(
+            "carlens:web:tests:rate-limit:production",
+            options.RedisKeyPrefix);
+        Assert.Same(firstLimiter, secondLimiter);
+        Assert.Equal("RedisAnalysisRateLimiter", firstLimiter.GetType().Name);
+    }
+
+    [Fact]
     public void Web_fails_fast_when_redis_connection_is_missing()
     {
         using var factory = new WebFactory(configureRedis: false);
@@ -69,7 +92,10 @@ public sealed class RedisWebConfigurationTests
     [InlineData(
         "DataProtection:KeyRingKeyPrefix",
         "DataProtection:KeyRingKeyPrefix configuration is missing.")]
-    public void Web_fails_fast_when_data_protection_configuration_is_missing(
+    [InlineData(
+        "Security:AnalysisRateLimit:KeyPrefix",
+        "Security:AnalysisRateLimit:KeyPrefix configuration is missing.")]
+    public void Web_FailsFastWhenSharedStateConfigurationIsMissing(
         string setting,
         string expectedMessage)
     {
@@ -101,6 +127,9 @@ public sealed class RedisWebConfigurationTests
                 .UseSetting(
                     "DataProtection:KeyRingKeyPrefix",
                     "carlens:web:tests:data-protection")
+                .UseSetting(
+                    "Security:AnalysisRateLimit:KeyPrefix",
+                    "carlens:web:tests:rate-limit")
                 .UseSetting(
                     "Redis:ConnectionString",
                     configureRedis
