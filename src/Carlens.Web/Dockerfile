@@ -26,4 +26,5 @@ RUN dotnet publish "src/Carlens.Web/Carlens.Web.csproj" \
 FROM runtime AS final
 WORKDIR /app
 COPY --from=build /app/publish .
+USER $APP_UID
 ENTRYPOINT ["dotnet", "Carlens.Web.dll"]

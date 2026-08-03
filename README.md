@@ -164,6 +164,7 @@ Projede CQRS için gereksiz bir framework bağımlılığı eklenmemiş, handler
 | **Recharts** | Piyasa ve güven grafiklerinin çizimi | React ile uyumlu, responsive ve bileşen tabanlı veri görselleştirme |
 | **Framer Motion** | Form ve durum geçişleri | Ani ekran değişimlerini azaltan, kullanıcıyı süreç boyunca yönlendiren akıcı animasyonlar |
 | **Docker Compose** | API, Web, Worker, PostgreSQL, Redis ve RabbitMQ ortamı | Geliştirme ortamını tek komutla tekrarlanabilir biçimde kurmak ve servis bağımlılıklarını görünür kılmak |
+| **Trivy + CycloneDX** | Production container image taraması ve SBOM üretimi | Düzeltilmiş `HIGH`/`CRITICAL` açıkları merge öncesinde engellemek, image içeriğini makine tarafından okunabilir biçimde envanterlemek ve SARIF sonuçlarını GitHub Code Scanning’e taşımak |
 | **xUnit + NetArchTest** | Unit testler ve Clean Architecture sınırları | Kritik davranışları hızlı doğrulamak ve yasak katman bağımlılıklarının zamanla geri gelmesini önlemek |
 | **Testcontainers** | PostgreSQL, Redis ve RabbitMQ integration testleri | Mock yerine gerçek servisleri geçici Docker container’larında çalıştırarak production’a daha yakın ve tekrarlanabilir doğrulama yapmak |
 | **GitHub Actions + CodeQL + Dependabot** | CI kalite kapıları, statik güvenlik analizi ve bağımlılık takibi | Pull request’lerde build, unit/architecture/integration testleri, migration kontrolü ve frontend build’ini zorunlu doğrulamak |
@@ -196,6 +197,8 @@ Bu repository herkese açık yayımlanabilecek şekilde tasarlanmıştır:
 - CSP, frame engelleme, MIME sniffing koruması, referrer ve permissions policy başlıkları uygulanır.
 - URL istekleri ve fotoğraf yüklemeleri için ayrı request boyutu sınırları vardır.
 - Docker geliştirme portları yalnızca `127.0.0.1` üzerinde yayımlanır.
+- API, Web ve Worker production image’ları root yetkisi olmayan kullanıcılarla çalışır; Docker build context’i yalnızca gerekli `src` dosyalarını içeren allowlist yaklaşımıyla sınırlandırılır.
+- Her production image’ı immutable `sha-<git-commit>` etiketiyle oluşturulur; Trivy düzeltilmiş `HIGH`/`CRITICAL` açıkları kalite kapısında engeller ve CycloneDX SBOM ile SARIF raporlarını workflow artifact’i olarak saklar.
 
 > [!NOTE]
 > Docker Compose ortamında Redis AOF kalıcılığı açıktır. Production dağıtımında managed Redis, TLS, güvenilen proxy yapılandırması ve Data Protection anahtarlarını Key Vault ile sarmalama kullanılmalıdır.
@@ -219,7 +222,7 @@ CarlensAI.sln
 ├── docs
 │   └── screenshots             # README ürün ekranları
 ├── .github
-│   ├── workflows              # CI ve CodeQL
+│   ├── workflows              # CI, container güvenliği ve CodeQL
 │   └── dependabot.yml
 └── docker-compose.yml
 ```
@@ -366,7 +369,9 @@ pnpm build
 Pop-Location
 ```
 
-GitHub Actions, `main` hedefli her pull request’te ve `main` branch’ine yapılan her push’ta uyarıları hata kabul eden .NET build, unit test, architecture test, Testcontainers integration testleri, migration drift kontrolü ve React production build adımlarını çalıştırır. Test sonuçları workflow artifact’i olarak saklanır. CodeQL, C# ve JavaScript/TypeScript kaynaklarını tarar; Dependabot ise NuGet, npm, Docker ve GitHub Actions bağımlılıklarını haftalık olarak takip eder.
+GitHub Actions, `main` hedefli her pull request’te ve `main` branch’ine yapılan her push’ta uyarıları hata kabul eden .NET build, unit test, architecture test, Testcontainers integration testleri, migration drift kontrolü ve React production build adımlarını çalıştırır. Test sonuçları workflow artifact’i olarak saklanır.
+
+Ayrı container güvenliği workflow’u API, Web ve Worker production image’larını immutable Git SHA etiketleriyle oluşturur, runtime kullanıcısının root olmadığını doğrular ve Trivy ile düzeltilmiş `HIGH`/`CRITICAL` açıkları merge öncesinde engeller. Her image için CycloneDX SBOM ve SARIF raporu üretilir; raporlar workflow artifact’i olarak saklanır ve `main` push’larında GitHub Code Scanning’e yüklenir. CodeQL, C# ve JavaScript/TypeScript kaynaklarını tarar; Dependabot ise NuGet, npm, Docker ve GitHub Actions bağımlılıklarını haftalık olarak takip eder.
 
 ## 🎯 Bu Projede Sergilenen Yetkinlikler
 
@@ -379,6 +384,7 @@ GitHub Actions, `main` hedefli her pull request’te ve `main` branch’ine yap�
 - NetArchTest ile otomatik Clean Architecture sınırları
 - Testcontainers ile gerçek PostgreSQL, Redis ve RabbitMQ integration testleri
 - GitHub Actions üzerinde build, test ve migration drift kalite kapıları
+- Rootless container image’ları, Trivy vulnerability gate, CycloneDX SBOM ve SARIF raporlama
 - OpenAI ile çok modlu ve JSON Schema tabanlı yapılandırılmış çıktı
 - Playwright ile dinamik web verisi okuma
 - AI token/görsel maliyeti optimizasyonu ve kullanım metriği takibi

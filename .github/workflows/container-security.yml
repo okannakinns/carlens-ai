@@ -1,0 +1,165 @@
+name: Container Security
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image-security:
+    name: Image security (${{ matrix.service }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: api
+            image: carlens-api
+            dockerfile: src/Carlens.Api/Dockerfile
+          - service: web
+            image: carlens-web
+            dockerfile: src/Carlens.Web/Dockerfile
+          - service: aiworker
+            image: carlens-aiworker
+            dockerfile: src/Carlens.AiWorker/Dockerfile
+
+    env:
+      IMAGE_REPOSITORY: local/${{ matrix.image }}
+      IMAGE_TAG: sha-${{ github.sha }}
+      REPORT_DIR: artifacts/container-security/${{ matrix.service }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate immutable image tag
+        shell: bash
+        run: |
+          if [[ ! "$IMAGE_TAG" =~ ^sha-[0-9a-f]{40}$ ]]; then
+            echo "::error::Image tags must use the immutable sha-<40 hex characters> format."
+            exit 1
+          fi
+
+          echo "IMAGE_REF=$IMAGE_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_ENV"
+
+      - name: Build production image
+        shell: bash
+        run: |
+          docker build \
+            --pull \
+            --file "${{ matrix.dockerfile }}" \
+            --tag "$IMAGE_REF" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.version=$IMAGE_TAG" \
+            .
+
+      - name: Verify non-root runtime user
+        shell: bash
+        run: |
+          declared_user="$(docker image inspect --format '{{.Config.User}}' "$IMAGE_REF")"
+          runtime_uid="$(docker run --rm --entrypoint id "$IMAGE_REF" -u)"
+          runtime_gid="$(docker run --rm --entrypoint id "$IMAGE_REF" -g)"
+          runtime_identity="$runtime_uid:$runtime_gid"
+
+          if [[ -z "$declared_user" || "$runtime_uid" == "0" || "$runtime_gid" == "0" ]]; then
+            echo "::error::The final image must declare a non-root runtime user."
+            exit 1
+          fi
+
+          echo "Declared user: $declared_user (runtime UID:GID $runtime_identity)"
+
+      - name: Prepare report directory
+        shell: bash
+        run: mkdir -p "$REPORT_DIR"
+
+      - name: Generate CycloneDX SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_REF }}
+          format: cyclonedx
+          output: ${{ env.REPORT_DIR }}/${{ matrix.service }}.cdx.json
+          exit-code: "0"
+          scanners: vuln
+          list-all-pkgs: "true"
+          version: v0.73.0
+
+      - name: Generate SARIF vulnerability report
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_REF }}
+          format: sarif
+          output: ${{ env.REPORT_DIR }}/${{ matrix.service }}.sarif
+          exit-code: "0"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          scanners: vuln
+          limit-severities-for-sarif: true
+          skip-setup-trivy: true
+          cache: false
+
+      - name: Upload SARIF to code scanning
+        if: always() && github.event_name == 'push'
+        uses: github/codeql-action/upload-sarif@18420e3271f74589575af831a523c833acda327f # v4
+        with:
+          sarif_file: ${{ env.REPORT_DIR }}/${{ matrix.service }}.sarif
+          category: trivy-${{ matrix.service }}
+
+      - name: Upload container security reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: container-security-${{ matrix.service }}-${{ github.sha }}
+          path: ${{ env.REPORT_DIR }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Enforce high and critical vulnerability gate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_REF }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          scanners: vuln
+          skip-setup-trivy: true
+          cache: false
+
+  container-security:
+    name: Container security
+    if: always()
+    needs:
+      - image-security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Verify all image security checks
+        shell: bash
+        env:
+          IMAGE_SECURITY_RESULT: ${{ needs.image-security.result }}
+        run: |
+          if [[ "$IMAGE_SECURITY_RESULT" != "success" ]]; then
+            echo "::error::At least one production image failed its security checks."
+            exit 1
+          fi

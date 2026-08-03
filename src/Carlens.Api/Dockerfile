@@ -16,4 +16,5 @@ RUN dotnet publish "src/Carlens.Api/Carlens.Api.csproj" -c Release -o /app/publi
 FROM runtime AS final
 WORKDIR /app
 COPY --from=build /app/publish .
+USER $APP_UID
 ENTRYPOINT ["dotnet", "Carlens.Api.dll"]
