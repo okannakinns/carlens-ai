@@ -24,4 +24,4 @@ WORKDIR /app
 COPY --from=build /app/publish .
 RUN chown -R pwuser:pwuser /app
 USER pwuser
-ENTRYPOINT ["xvfb-run", "--auto-servernum", "--server-args=-screen 0 1440x1000x24", "dotnet", "Carlens.AiWorker.dll"]
+ENTRYPOINT ["dotnet", "Carlens.AiWorker.dll"]

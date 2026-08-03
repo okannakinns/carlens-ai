@@ -31,6 +31,7 @@
     <ProjectReference Include="..\..\src\Carlens.Contracts\Carlens.Contracts.csproj" />
     <ProjectReference Include="..\..\src\Carlens.Infrastructure\Carlens.Infrastructure.csproj" />
     <ProjectReference Include="..\..\src\Carlens.Api\Carlens.Api.csproj" />
+    <ProjectReference Include="..\..\src\Carlens.AiWorker\Carlens.AiWorker.csproj" />
     <ProjectReference Include="..\..\src\Carlens.Web\Carlens.Web.csproj" />
   </ItemGroup>
 

@@ -10,6 +10,7 @@ services:
       ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=carlensai;Username=carlens;Password=carlens
       Redis__ConnectionString: redis:6379
       RabbitMQ__HostName: rabbitmq
+      RabbitMQ__Port: "5672"
       Security__InternalApiKey: ${CARLENS_INTERNAL_API_KEY:-}
     ports:
       - "127.0.0.1:5000:8080"
@@ -47,13 +48,16 @@ services:
     container_name: carlens-aiworker
     init: true
     ipc: host
+    stop_grace_period: 2m10s
     environment:
       DOTNET_ENVIRONMENT: Development
       ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=carlensai;Username=carlens;Password=carlens
       Redis__ConnectionString: redis:6379
       RabbitMQ__HostName: rabbitmq
+      RabbitMQ__Port: "5672"
+      Worker__ShutdownTimeoutSeconds: "120"
       OpenAI__ApiKey: ${OPENAI_API_KEY:-}
-      ListingSource__Headless: "false"
+      ListingSource__Headless: "true"
       ListingSource__MaxComparables: "20"
     depends_on:
       postgres:

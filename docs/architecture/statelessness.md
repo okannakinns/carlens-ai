@@ -27,5 +27,6 @@ Uygulama container dosya sistemine kullanıcı veya iş verisi yazmaz. Kalıcı 
 ## Operasyonel Sınırlar
 
 - Production ortamında istemci IP'si yalnızca güvenilen reverse proxy/load balancer üzerinden `Forwarded Headers` yapılandırmasıyla alınmalıdır.
-- RabbitMQ mesaj kalıcılığı, retry, dead-letter queue ve Worker graceful shutdown ayrı Worker güvenilirliği çalışmasında ele alınacaktır.
+- Worker shutdown sırasında yeni RabbitMQ teslimatlarını durdurur ve devam eden mesajı yapılandırılmış süre içinde tamamlamaya çalışır; süre aşılırsa mesaj ack edilmeden kanal kapanır ve broker tarafından yeniden kuyruğa alınır.
+- RabbitMQ publisher mesaj kalıcılığı, retry ve dead-letter queue ayrı Worker güvenilirliği çalışmalarında ele alınacaktır.
 - Production Redis bağlantısı TLS kullanmalı; Data Protection anahtarları Key Vault anahtarıyla şifrelenmelidir.
