@@ -2,7 +2,12 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -12,8 +17,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  dotnet:
-    name: .NET build and test
+  dotnet-quality:
+    name: .NET quality gates
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -29,15 +34,95 @@ jobs:
       - name: Restore
         run: dotnet restore CarlensAI.sln
 
-      - name: Build
-        run: dotnet build CarlensAI.sln --configuration Release --no-restore
+      - name: Restore .NET tools
+        run: dotnet tool restore
 
-      - name: Test
+      - name: Build with warnings as errors
+        run: >
+          dotnet build CarlensAI.sln
+          --configuration Release
+          --no-restore
+          --warnaserror
+
+      - name: Run unit tests
         run: >
           dotnet test test/Carlens.Tests/Carlens.Tests.csproj
           --configuration Release
           --no-build
-          --logger "trx;LogFileName=test-results.trx"
+          --logger "trx;LogFileName=unit-tests.trx"
+          --results-directory artifacts/test-results/unit
+
+      - name: Enforce architecture boundaries
+        run: >
+          dotnet test test/Carlens.ArchitectureTests/Carlens.ArchitectureTests.csproj
+          --configuration Release
+          --no-build
+          --logger "trx;LogFileName=architecture-tests.trx"
+          --results-directory artifacts/test-results/architecture
+
+      - name: Detect missing EF Core migrations
+        run: >
+          dotnet ef migrations has-pending-model-changes
+          --project src/Carlens.Infrastructure/Carlens.Infrastructure.csproj
+          --startup-project src/Carlens.Api/Carlens.Api.csproj
+          --configuration Release
+          --no-build
+          --
+          --environment Development
+
+      - name: Upload .NET test results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: dotnet-test-results
+          path: artifacts/test-results/**/*.trx
+          if-no-files-found: ignore
+          retention-days: 7
+
+  integration:
+    name: Testcontainers integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: >
+          dotnet restore
+          test/Carlens.IntegrationTests/Carlens.IntegrationTests.csproj
+
+      - name: Build with warnings as errors
+        run: >
+          dotnet build
+          test/Carlens.IntegrationTests/Carlens.IntegrationTests.csproj
+          --configuration Release
+          --no-restore
+          --warnaserror
+
+      - name: Run PostgreSQL, Redis and RabbitMQ integration tests
+        run: >
+          dotnet test
+          test/Carlens.IntegrationTests/Carlens.IntegrationTests.csproj
+          --configuration Release
+          --no-build
+          --logger "trx;LogFileName=integration-tests.trx"
+          --results-directory artifacts/test-results/integration
+
+      - name: Upload integration test results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: integration-test-results
+          path: artifacts/test-results/integration/*.trx
+          if-no-files-found: ignore
+          retention-days: 7
 
   frontend:
     name: React build
