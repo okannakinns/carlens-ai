@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   dotnet-quality:
-    name: .NET quality gates
+    name: .NET build and test
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
