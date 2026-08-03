@@ -16,4 +16,8 @@
     <ProjectReference Include="..\Carlens.Infrastructure\Carlens.Infrastructure.csproj" />
     <ProjectReference Include="..\Carlens.Contracts\Carlens.Contracts.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Carlens.Tests" />
+  </ItemGroup>
 </Project>

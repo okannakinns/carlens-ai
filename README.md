@@ -156,10 +156,10 @@ Projede CQRS için gereksiz bir framework bağımlılığı eklenmemiş, handler
 | **ASP.NET Core BFF** | React ile API arasındaki güvenlik sınırı | Backend adresini ve servis anahtarını tarayıcıdan gizlemek; oturum, CSRF ve erişim denetimini sunucu tarafında yapmak |
 | **PostgreSQL 18** | Araçlar, analizler, görseller, teknik özellikler ve emsaller | Güçlü ilişkisel model, transaction desteği, açık kaynak ekosistemi ve üretim olgunluğu |
 | **EF Core 10** | ORM, entity konfigürasyonları ve migration yönetimi | Domain modellerini ilişkisel şemaya kontrollü biçimde eşlemek ve şema değişikliklerini versiyonlamak |
-| **RabbitMQ 4** | Analiz istek kuyruğu | Uzun süren ilan okuma ve AI çağrılarını HTTP isteğinden ayırmak; dayanıklı kuyruk ve manuel `ack/nack` ile güvenilir tüketim |
-| **Worker Service** | Kuyruktaki analizlerin arka planda işlenmesi | API’nin hızlı cevap vermesini ve AI iş yükünün bağımsız ölçeklenebilmesini sağlamak |
+| **RabbitMQ 4** | Analiz istek kuyruğu | Uzun süren ilan okuma ve AI çağrılarını HTTP isteğinden ayırmak; manuel `ack/nack`, tek mesajlık prefetch ve graceful drain ile güvenilir tüketim |
+| **Worker Service** | Kuyruktaki analizlerin arka planda işlenmesi | API’nin hızlı cevap vermesini, AI iş yükünün bağımsız ölçeklenmesini ve deployment sırasında devam eden mesajların güvenle tamamlanmasını sağlamak |
 | **Redis 8** | Yinelenen analiz koruması, dağıtılmış session, Data Protection key ring ve dağıtık rate limit | Tekrar AI maliyetini önlemek; Web replikaları arasında oturum, güvenlik anahtarları ve istek kotalarını paylaşmak |
-| **Microsoft Playwright** | JavaScript ile oluşturulan ilan verisini okumak | Dinamik sayfalarda gerçek tarayıcı davranışıyla güvenilir veri toplamak; container içinde Xvfb ile kullanıcıya pencere göstermeden çalışmak |
+| **Microsoft Playwright** | JavaScript ile oluşturulan ilan verisini okumak | Dinamik sayfalarda gerçek tarayıcı davranışıyla güvenilir veri toplamak; headless çalışma ile kullanıcıya pencere göstermeden container sinyallerini doğrudan Worker'a iletmek |
 | **OpenAI Responses API** | Metin ve görsellerden yapılandırılmış araç raporu üretmek | Çok modlu analiz, JSON Schema ile öngörülebilir çıktı ve maliyet/kullanım metriklerinin takip edilebilmesi |
 | **Recharts** | Piyasa ve güven grafiklerinin çizimi | React ile uyumlu, responsive ve bileşen tabanlı veri görselleştirme |
 | **Framer Motion** | Form ve durum geçişleri | Ani ekran değişimlerini azaltan, kullanıcıyı süreç boyunca yönlendiren akıcı animasyonlar |
@@ -353,7 +353,7 @@ GitHub Actions her push ve pull request’te .NET build/test ile React build ad�
 - SOLID prensipleriyle domain modelleme ve katman bağımlılıklarının yönetimi
 - Clean Architecture ile framework’ten bağımsız iş kuralları
 - CQRS tabanlı use case tasarımı ve FluentValidation
-- RabbitMQ ile event-driven, asenkron iş akışı
+- RabbitMQ ile event-driven iş akışı, manuel acknowledgement ve Worker graceful shutdown
 - Redis ile atomik idempotency, dağıtılmış session, paylaşılan Data Protection key ring ve dağıtık rate limit yönetimi
 - PostgreSQL, EF Core configuration ve migration yönetimi
 - OpenAI ile çok modlu ve JSON Schema tabanlı yapılandırılmış çıktı
