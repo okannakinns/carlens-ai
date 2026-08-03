@@ -164,8 +164,9 @@ Projede CQRS için gereksiz bir framework bağımlılığı eklenmemiş, handler
 | **Recharts** | Piyasa ve güven grafiklerinin çizimi | React ile uyumlu, responsive ve bileşen tabanlı veri görselleştirme |
 | **Framer Motion** | Form ve durum geçişleri | Ani ekran değişimlerini azaltan, kullanıcıyı süreç boyunca yönlendiren akıcı animasyonlar |
 | **Docker Compose** | API, Web, Worker, PostgreSQL, Redis ve RabbitMQ ortamı | Geliştirme ortamını tek komutla tekrarlanabilir biçimde kurmak ve servis bağımlılıklarını görünür kılmak |
-| **xUnit + coverlet** | Domain, validation, mapping ve güvenlik testleri | Kritik davranışları hızlı ve otomatik doğrulamak, kapsam raporu üretebilmek |
-| **GitHub Actions + CodeQL + Dependabot** | CI, statik güvenlik analizi ve bağımlılık takibi | Her değişiklikte backend testini/frontend build’ini doğrulamak ve bağımlılık risklerini erken görmek |
+| **xUnit + NetArchTest** | Unit testler ve Clean Architecture sınırları | Kritik davranışları hızlı doğrulamak ve yasak katman bağımlılıklarının zamanla geri gelmesini önlemek |
+| **Testcontainers** | PostgreSQL, Redis ve RabbitMQ integration testleri | Mock yerine gerçek servisleri geçici Docker container’larında çalıştırarak production’a daha yakın ve tekrarlanabilir doğrulama yapmak |
+| **GitHub Actions + CodeQL + Dependabot** | CI kalite kapıları, statik güvenlik analizi ve bağımlılık takibi | Pull request’lerde build, unit/architecture/integration testleri, migration kontrolü ve frontend build’ini zorunlu doğrulamak |
 
 ## 💸 AI Maliyet Optimizasyonu
 
@@ -212,7 +213,9 @@ CarlensAI.sln
 │   ├── Carlens.AiWorker        # RabbitMQ consumer ve analiz orkestrasyonu
 │   └── Carlens.Web             # ASP.NET Core BFF + React SPA
 ├── test
-│   └── Carlens.Tests           # Domain, application, mapping ve güvenlik testleri
+│   ├── Carlens.Tests             # Domain, application, mapping ve güvenlik unit testleri
+│   ├── Carlens.ArchitectureTests # Clean Architecture bağımlılık kuralları
+│   └── Carlens.IntegrationTests  # PostgreSQL, Redis ve RabbitMQ Testcontainers testleri
 ├── docs
 │   └── screenshots             # README ürün ekranları
 ├── .github
@@ -239,7 +242,7 @@ CarlensAI.sln
 
 - [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/)
-- EF Core CLI: `dotnet tool install --global dotnet-ef --version 10.0.9`
+- Repository tarafından sabitlenen EF Core CLI: `dotnet tool restore`
 - Yalnızca frontend’i yerelde geliştirmek için Node.js 24 ve pnpm 11
 - Size ait bir OpenAI API anahtarı
 
@@ -331,10 +334,27 @@ dotnet run --project src/Carlens.Web/Carlens.Web.csproj
 
 ## 🧪 Test ve Kod Kalitesi
 
-Backend testlerini çalıştırmak için:
+Hızlı unit ve architecture testlerini çalıştırmak için:
 
 ```powershell
 dotnet test test/Carlens.Tests/Carlens.Tests.csproj
+dotnet test test/Carlens.ArchitectureTests/Carlens.ArchitectureTests.csproj
+```
+
+Docker Desktop çalışırken gerçek PostgreSQL, Redis ve RabbitMQ servisleriyle integration testlerini çalıştırmak için:
+
+```powershell
+dotnet test test/Carlens.IntegrationTests/Carlens.IntegrationTests.csproj
+```
+
+Entity modeli değiştiği halde migration eklenmesinin unutulmadığını doğrulamak için:
+
+```powershell
+dotnet tool restore
+dotnet ef migrations has-pending-model-changes `
+  --project src/Carlens.Infrastructure/Carlens.Infrastructure.csproj `
+  --startup-project src/Carlens.Api/Carlens.Api.csproj `
+  -- --environment Development
 ```
 
 Frontend üretim derlemesini doğrulamak için:
@@ -346,7 +366,7 @@ pnpm build
 Pop-Location
 ```
 
-GitHub Actions her push ve pull request’te .NET build/test ile React build adımlarını çalıştırır. CodeQL, C# ve JavaScript/TypeScript kaynaklarını tarar; Dependabot ise NuGet, npm, Docker ve GitHub Actions bağımlılıklarını haftalık olarak takip eder.
+GitHub Actions, `main` hedefli her pull request’te ve `main` branch’ine yapılan her push’ta uyarıları hata kabul eden .NET build, unit test, architecture test, Testcontainers integration testleri, migration drift kontrolü ve React production build adımlarını çalıştırır. Test sonuçları workflow artifact’i olarak saklanır. CodeQL, C# ve JavaScript/TypeScript kaynaklarını tarar; Dependabot ise NuGet, npm, Docker ve GitHub Actions bağımlılıklarını haftalık olarak takip eder.
 
 ## 🎯 Bu Projede Sergilenen Yetkinlikler
 
@@ -356,6 +376,9 @@ GitHub Actions her push ve pull request’te .NET build/test ile React build ad�
 - RabbitMQ ile event-driven iş akışı, manuel acknowledgement ve Worker graceful shutdown
 - Redis ile atomik idempotency, dağıtılmış session, paylaşılan Data Protection key ring ve dağıtık rate limit yönetimi
 - PostgreSQL, EF Core configuration ve migration yönetimi
+- NetArchTest ile otomatik Clean Architecture sınırları
+- Testcontainers ile gerçek PostgreSQL, Redis ve RabbitMQ integration testleri
+- GitHub Actions üzerinde build, test ve migration drift kalite kapıları
 - OpenAI ile çok modlu ve JSON Schema tabanlı yapılandırılmış çıktı
 - Playwright ile dinamik web verisi okuma
 - AI token/görsel maliyeti optimizasyonu ve kullanım metriği takibi
