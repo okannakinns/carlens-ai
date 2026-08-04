@@ -1,0 +1,146 @@
+name: Infrastructure
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: infrastructure-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bicep-validation:
+    name: Bicep validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      BICEP_VERSION: v0.46.1
+      BICEP_SHA256: 3e011d629ea4311b7a7dd8f0040ab2b1a072ea4ff5d02cb75e0e55a9a6703fb9
+      CARLENS_IMAGE_TAG: sha-0123456789abcdef0123456789abcdef01234567
+      CARLENS_POSTGRES_ADMIN_PASSWORD: LocalValidationOnly-DoNotUse-2026!
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install verified Bicep CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          curl --fail --location --silent --show-error \
+            "https://github.com/Azure/bicep/releases/download/${BICEP_VERSION}/bicep-linux-x64" \
+            --output /tmp/bicep
+          echo "${BICEP_SHA256}  /tmp/bicep" | sha256sum --check
+          chmod +x /tmp/bicep
+          echo "BICEP_CLI=/tmp/bicep" >> "$GITHUB_ENV"
+
+      - name: Validate immutable image tag
+        shell: bash
+        run: |
+          if [[ ! "$CARLENS_IMAGE_TAG" =~ ^sha-[0-9a-f]{40}$ ]]; then
+            echo "::error::Image tags must use the immutable sha-<40 hex characters> format."
+            exit 1
+          fi
+
+      - name: Lint Bicep entry points
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$BICEP_CLI" lint infra/main.bicep
+          "$BICEP_CLI" lint infra/apps.bicep
+
+      - name: Compile ARM templates
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/arm
+          "$BICEP_CLI" build infra/main.bicep \
+            --outfile artifacts/arm/foundation.json
+          "$BICEP_CLI" build infra/apps.bicep \
+            --outfile artifacts/arm/apps.json
+
+      - name: Compile environment parameters
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for parameter_file in \
+            infra/environments/staging.foundation.bicepparam \
+            infra/environments/production.foundation.bicepparam \
+            infra/environments/staging.apps.bicepparam \
+            infra/environments/production.apps.bicepparam
+          do
+            output_file="/tmp/$(basename "$parameter_file" .bicepparam).parameters.json"
+            "$BICEP_CLI" build-params "$parameter_file" --outfile "$output_file"
+          done
+
+          rm -f /tmp/*.parameters.json
+
+      - name: Verify compiled infrastructure invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          jq --exit-status \
+            '.parameters.postgresqlAdministratorPassword.type == "securestring"' \
+            artifacts/arm/foundation.json > /dev/null
+          jq --exit-status \
+            '.parameters.imageTag.minLength == 44 and .parameters.imageTag.maxLength == 44' \
+            artifacts/arm/apps.json > /dev/null
+          jq --exit-status \
+            '[.resources[] | select(.type == "Microsoft.App/containerApps")] | length == 3' \
+            artifacts/arm/apps.json > /dev/null
+          jq --exit-status \
+            '[.resources[] | select(.type == "Microsoft.App/containerApps" and .properties.configuration.ingress != null) | .properties.configuration.ingress.external] | sort == [false, true]' \
+            artifacts/arm/apps.json > /dev/null
+          jq --exit-status \
+            '[.resources[] | select(.type == "Microsoft.App/containerApps") | .properties.configuration.secrets[] | has("value")] | any | not' \
+            artifacts/arm/apps.json > /dev/null
+          jq --exit-status \
+            '[.resources[] | select(.type == "Microsoft.App/containerApps") | .properties.template.containers[] | select(.name == "api" or .name == "web") | .env[] | select(.name == "ASPNETCORE_FORWARDEDHEADERS_ENABLED" and .value == "true")] | length == 2' \
+            artifacts/arm/apps.json > /dev/null
+          jq --exit-status \
+            '[.resources[] | select(.type == "Microsoft.App/containerApps" and .properties.template.containers[0].name == "aiworker") | .properties.template.scale.rules[] | select(.custom.type == "rabbitmq" and .custom.metadata.tls == "enable" and .custom.auth[0].secretRef == "rabbitmq-uri")] | length == 1' \
+            artifacts/arm/apps.json > /dev/null
+          jq --exit-status \
+            '[.. | objects | select(.type? == "Microsoft.DBforPostgreSQL/flexibleServers") | .properties.network.publicNetworkAccess] == ["Disabled"]' \
+            artifacts/arm/foundation.json > /dev/null
+          jq --exit-status \
+            '[.. | objects | select(.type? == "Microsoft.Cache/redisEnterprise") | .properties.publicNetworkAccess] == ["Disabled"]' \
+            artifacts/arm/foundation.json > /dev/null
+          jq --exit-status \
+            '[.. | objects | select(.type? == "Microsoft.KeyVault/vaults") | .properties.enableRbacAuthorization] == [true]' \
+            artifacts/arm/foundation.json > /dev/null
+          jq --exit-status \
+            '[.. | objects | select(.type? == "Microsoft.ContainerRegistry/registries") | .properties.adminUserEnabled] == [false]' \
+            artifacts/arm/foundation.json > /dev/null
+          jq --exit-status \
+            '[.outputs | keys[] | ascii_downcase | select(test("secret|password|connectionstring|apikey"))] | length == 0' \
+            artifacts/arm/foundation.json > /dev/null
+          jq --exit-status \
+            '[.outputs | keys[] | ascii_downcase | select(test("secret|password|connectionstring|apikey"))] | length == 0' \
+            artifacts/arm/apps.json > /dev/null
+
+          if grep --recursive --line-number --fixed-strings ':latest' infra; then
+            echo "::error::Mutable latest image tags are not allowed in infrastructure definitions."
+            exit 1
+          fi
+
+      - name: Upload compiled ARM templates
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: arm-templates-${{ github.sha }}
+          path: artifacts/arm
+          if-no-files-found: error
+          retention-days: 7

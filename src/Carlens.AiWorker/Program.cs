@@ -1,3 +1,4 @@
+using Azure.Monitor.OpenTelemetry.AspNetCore;
 using Carlens.AiWorker;
 using Carlens.AiWorker.Consumers;
 using Carlens.AiWorker.Services;
@@ -5,6 +6,12 @@ using Carlens.Application.Extensions;
 using Carlens.Infrastructure.Extensions;
 
 HostApplicationBuilder builder = Host.CreateApplicationBuilder(args);
+
+if (!string.IsNullOrWhiteSpace(
+        builder.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"]))
+{
+    builder.Services.AddOpenTelemetry().UseAzureMonitor();
+}
 
 builder.Services.AddApplicationServices();
 builder.Services.AddInfrastructureServices(builder.Configuration);

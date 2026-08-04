@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using Carlens.Contracts.Events;
+using Carlens.Infrastructure.Messaging;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 using RabbitMQ.Client.Exceptions;
@@ -41,19 +42,9 @@ internal sealed class RabbitMqAnalysisEventConsumer(
 
         _handler = handler;
 
-        var rabbitMqPort = int.TryParse(
-            configuration["RabbitMQ:Port"],
-            out var configuredPort)
-            ? configuredPort
-            : 5672;
-        var factory = new ConnectionFactory
-        {
-            HostName = configuration["RabbitMQ:HostName"] ?? "localhost",
-            Port = rabbitMqPort,
-            UserName = configuration["RabbitMQ:UserName"] ?? "guest",
-            Password = configuration["RabbitMQ:Password"] ?? "guest",
-            ConsumerDispatchConcurrency = 1
-        };
+        var factory = RabbitMqConnectionFactory.Create(
+            configuration,
+            clientProvidedName: "carlens-aiworker-consumer");
 
         IConnection? connection = null;
         IChannel? channel = null;
