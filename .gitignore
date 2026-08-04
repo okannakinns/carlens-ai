@@ -16,6 +16,11 @@ coverage.*
 *.coveragexml
 *.trx
 
+# Bicep compilation outputs; source .bicep and .bicepparam files are tracked.
+infra/main.json
+infra/apps.json
+infra/environments/*.parameters.json
+
 # -----------------------------------------------------------------------------
 # Visual Studio, VS Code, Rider and user-specific project state
 # -----------------------------------------------------------------------------

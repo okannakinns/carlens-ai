@@ -1,3 +1,4 @@
+using Azure.Monitor.OpenTelemetry.AspNetCore;
 using Carlens.Web.HealthChecks;
 using Carlens.Web.Middlewares;
 using Carlens.Web.Security;
@@ -8,6 +9,12 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
+
+if (!string.IsNullOrWhiteSpace(
+        builder.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"]))
+{
+    builder.Services.AddOpenTelemetry().UseAzureMonitor();
+}
 
 var redisConnectionString = builder.Configuration["Redis:ConnectionString"];
 

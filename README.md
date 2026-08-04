@@ -164,6 +164,8 @@ Projede CQRS için gereksiz bir framework bağımlılığı eklenmemiş, handler
 | **Recharts** | Piyasa ve güven grafiklerinin çizimi | React ile uyumlu, responsive ve bileşen tabanlı veri görselleştirme |
 | **Framer Motion** | Form ve durum geçişleri | Ani ekran değişimlerini azaltan, kullanıcıyı süreç boyunca yönlendiren akıcı animasyonlar |
 | **Docker Compose** | API, Web, Worker, PostgreSQL, Redis ve RabbitMQ ortamı | Geliştirme ortamını tek komutla tekrarlanabilir biçimde kurmak ve servis bağımlılıklarını görünür kılmak |
+| **Azure Container Apps + Bicep** | Staging ve production çalışma ortamı ile Infrastructure as Code | Revision tabanlı dağıtım, managed identity, private networking ve ortamlar arası tekrarlanabilir altyapı sağlamak |
+| **Application Insights + OpenTelemetry** | API, Web ve Worker telemetrisi | Dağıtık istekleri, HTTP bağımlılıklarını, logları ve metrikleri aynı korelasyon bağlamında izlemek |
 | **Trivy + CycloneDX** | Production container image taraması ve SBOM üretimi | Düzeltilmiş `HIGH`/`CRITICAL` açıkları merge öncesinde engellemek, image içeriğini makine tarafından okunabilir biçimde envanterlemek ve SARIF sonuçlarını GitHub Code Scanning’e taşımak |
 | **xUnit + NetArchTest** | Unit testler ve Clean Architecture sınırları | Kritik davranışları hızlı doğrulamak ve yasak katman bağımlılıklarının zamanla geri gelmesini önlemek |
 | **Testcontainers** | PostgreSQL, Redis ve RabbitMQ integration testleri | Mock yerine gerçek servisleri geçici Docker container’larında çalıştırarak production’a daha yakın ve tekrarlanabilir doğrulama yapmak |
@@ -201,7 +203,7 @@ Bu repository herkese açık yayımlanabilecek şekilde tasarlanmıştır:
 - Her production image’ı immutable `sha-<git-commit>` etiketiyle oluşturulur; Trivy düzeltilmiş `HIGH`/`CRITICAL` açıkları kalite kapısında engeller ve CycloneDX SBOM ile SARIF raporlarını workflow artifact’i olarak saklar.
 
 > [!NOTE]
-> Docker Compose ortamında Redis AOF kalıcılığı açıktır. Production dağıtımında managed Redis, TLS, güvenilen proxy yapılandırması ve Data Protection anahtarlarını Key Vault ile sarmalama kullanılmalıdır.
+> Docker Compose ortamında Redis AOF kalıcılığı açıktır. Azure production profili PostgreSQL ve Azure Managed Redis'i public internete kapatır; private endpoint, TLS, managed identity ve Key Vault referansları kullanır.
 
 ## 📁 Solution Yapısı
 
@@ -221,11 +223,17 @@ CarlensAI.sln
 │   └── Carlens.IntegrationTests  # PostgreSQL, Redis ve RabbitMQ Testcontainers testleri
 ├── docs
 │   └── screenshots             # README ürün ekranları
+├── infra                       # Bicep modülleri ve staging/production parametreleri
 ├── .github
-│   ├── workflows              # CI, container güvenliği ve CodeQL
+│   ├── workflows              # CI, container güvenliği, Bicep doğrulama ve CodeQL
 │   └── dependabot.yml
 └── docker-compose.yml
 ```
+
+Azure kaynakları foundation ve application deployment olarak ikiye ayrılır.
+PostgreSQL 18, Azure Managed Redis, ACR, Key Vault, Application Insights,
+Log Analytics, VNet ve Container Apps ortamının ayrıntıları için
+[`infra/README.md`](infra/README.md) dosyasına bakabilirsiniz.
 
 ## 🧩 Servisler
 
@@ -373,6 +381,8 @@ GitHub Actions, `main` hedefli her pull request’te ve `main` branch’ine yap�
 
 Ayrı container güvenliği workflow’u API, Web ve Worker production image’larını immutable Git SHA etiketleriyle oluşturur, runtime kullanıcısının root olmadığını doğrular ve Trivy ile düzeltilmiş `HIGH`/`CRITICAL` açıkları merge öncesinde engeller. Her image için CycloneDX SBOM ve SARIF raporu üretilir; raporlar workflow artifact’i olarak saklanır ve `main` push’larında GitHub Code Scanning’e yüklenir. CodeQL, C# ve JavaScript/TypeScript kaynaklarını tarar; Dependabot ise NuGet, npm, Docker ve GitHub Actions bağımlılıklarını haftalık olarak takip eder.
 
+Infrastructure workflow’u checksum ile doğrulanmış sabit Bicep CLI sürümünü kullanır; foundation, application ve dört ortam parametre dosyasını derler. Secure PostgreSQL parametresi, immutable image etiketi, üç Container App tanımı ve secret içermeyen output sözleşmesi ARM şablonları üzerinde kalite kapısı olarak doğrulanır.
+
 ## 🎯 Bu Projede Sergilenen Yetkinlikler
 
 - SOLID prensipleriyle domain modelleme ve katman bağımlılıklarının yönetimi
@@ -385,6 +395,8 @@ Ayrı container güvenliği workflow’u API, Web ve Worker production image’l
 - Testcontainers ile gerçek PostgreSQL, Redis ve RabbitMQ integration testleri
 - GitHub Actions üzerinde build, test ve migration drift kalite kapıları
 - Rootless container image’ları, Trivy vulnerability gate, CycloneDX SBOM ve SARIF raporlama
+- Bicep ile modüler Azure IaC, private endpoint, managed identity ve least-privilege RBAC
+- Application Insights ve OpenTelemetry ile merkezi trace, metric ve log korelasyonu
 - OpenAI ile çok modlu ve JSON Schema tabanlı yapılandırılmış çıktı
 - Playwright ile dinamik web verisi okuma
 - AI token/görsel maliyeti optimizasyonu ve kullanım metriği takibi
@@ -400,8 +412,8 @@ Ayrı container güvenliği workflow’u API, Web ve Worker production image’l
 - Kaydedilebilir ve paylaşılabilir analiz raporları
 - Kimlik doğrulama sonrası kullanıcı ve abonelik bazlı kota politikaları
 - Retry politikası, dead-letter queue ve gelişmiş mesaj gözlemlenebilirliği
-- OpenTelemetry, merkezi loglama, metrik ve alarm altyapısı
-- Production ortamı için managed secret store, TLS ve otomatik deployment
+- Otomatik staging deployment ve smoke test kalite kapısı
+- Production blue-green trafik aktarımı ve otomatik rollback
 
 ## ⚖️ Yasal ve Teknik Uyarı
 
