@@ -1,4 +1,4 @@
-FROM node:24-alpine AS client-build
+FROM node:26-alpine AS client-build
 WORKDIR /client
 COPY ["src/Carlens.Web/ClientApp/package.json", "."]
 COPY ["src/Carlens.Web/ClientApp/pnpm-lock.yaml", "."]
