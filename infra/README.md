@@ -6,6 +6,8 @@ tanımlar. Altyapı ile uygulama dağıtımı iki ayrı giriş noktasına ayrıl
 - `main.bicep`: Ortamın uzun ömürlü temel kaynaklarını oluşturur.
 - `apps.bicep`: Aynı immutable image etiketiyle API, Web ve Worker revision'larını
   dağıtır.
+- `migration-job.bicep`: API image'ındaki EF Core migration bundle'ını tek
+  replica ve manuel tetiklemeyle çalıştıran Container Apps Job'u tanımlar.
 
 Bu ayrım, henüz ACR içinde image bulunmadan temel altyapının kurulabilmesini ve
 uygulama revision'larının altyapıdan bağımsız olarak geri alınabilmesini sağlar.
@@ -92,6 +94,11 @@ değerleri Key Vault secret'ları olarak oluşturur:
 Container Apps, secret değerlerini Bicep parametresi olarak almaz. Key Vault
 referanslarını kendi user-assigned managed identity'siyle çözer.
 
+`postgres-connection-string`, Azure PostgreSQL FQDN'ini kullanmalı ve TLS
+sertifika doğrulamasını `SSL Mode=VerifyFull` ile zorunlu tutmalıdır. Kerberos
+kullanılmayan bu parola tabanlı bağlantıda `GSS Encryption Mode=Disable`, minimal
+Linux image'larında gereksiz GSSAPI denemesini de engeller.
+
 ## Yerel Doğrulama
 
 [Bicep CLI](https://github.com/Azure/bicep/releases) `v0.46.1` ile:
@@ -102,12 +109,16 @@ $env:CARLENS_IMAGE_TAG = "sha-0123456789abcdef0123456789abcdef01234567"
 
 bicep lint infra/main.bicep
 bicep lint infra/apps.bicep
+bicep lint infra/migration-job.bicep
 bicep build infra/main.bicep
 bicep build infra/apps.bicep
+bicep build infra/migration-job.bicep
 bicep build-params infra/environments/staging.foundation.bicepparam
 bicep build-params infra/environments/production.foundation.bicepparam
 bicep build-params infra/environments/staging.apps.bicepparam
 bicep build-params infra/environments/production.apps.bicepparam
+bicep build-params infra/environments/staging.migration.bicepparam
+bicep build-params infra/environments/production.migration.bicepparam
 ```
 
 GitHub Actions aynı kontrolleri checksum ile doğrulanmış Bicep binary'siyle
@@ -124,6 +135,48 @@ derlenmiş parametre dosyalarını hiçbir zaman yüklemez.
 5. `apps.bicep` ile revision'ları dağıtın.
 6. Readiness ve smoke testleri geçtikten sonra trafiği aktarın.
 
-Planlanan staging CD bu akışı otomatik uygulayacak. Production CD ise GitHub
+## Staging CD
+
+`.github/workflows/staging.yml`, `main` branch'ine yapılan her push'ta staging
+dağıtımını çalıştırır. Aynı commit için zorunlu CI kontrollerinin tamamlanmasını
+bekler; API, Web ve Worker image'larını üretip Trivy ile tarar, ACR'a gönderir ve
+ilgili image sürümünü yazma/silme işlemlerine karşı kilitler. Ardından migration
+job sırasıyla çalıştırılır, uygulamalar dağıtılır ve dış Web adresi üzerinden
+live, ready, SPA, güvenlik başlığı ve API gateway smoke testleri uygulanır.
+
+Workflow, repository değişkeni `AZURE_DEPLOYMENTS_ENABLED` değeri `true`
+olmadıkça bilinçli olarak skip edilir. Böylece örnek repository fork'ları veya
+henüz Azure kurulumu yapılmamış ortamlar yanlışlıkla kaynak oluşturamaz.
+
+GitHub'da `staging` Environment'ını yalnızca protected branch deployment'larına
+açın ve aşağıdaki environment variable'larını tanımlayın:
+
+| Variable | Açıklama |
+|---|---|
+| `AZURE_CLIENT_ID` | Staging deployment kimliğinin application/client ID değeri |
+| `AZURE_TENANT_ID` | Microsoft Entra tenant ID değeri |
+| `AZURE_SUBSCRIPTION_ID` | Staging kaynaklarının bulunduğu subscription ID değeri |
+| `AZURE_RESOURCE_GROUP` | Varsayılan kurulumda `rg-carlens-staging` |
+
+Kimlik doğrulama client secret kullanmaz. Azure deployment kimliğinde GitHub
+OIDC için aşağıdaki subject'e sahip federated credential tanımlanır:
+
+```text
+repo:okannakinns/carlens-ai:environment:staging
+```
+
+Deployment kimliği staging resource group üzerinde `Contributor`, staging ACR
+üzerinde `AcrPush` rollerine sahip olmalıdır. Foundation kaynakları ve Key Vault
+secret sözleşmesi hazırlandıktan sonra repository variable'ını etkinleştirin:
+
+```text
+AZURE_DEPLOYMENTS_ENABLED=true
+```
+
+Migration, yeni revision'lardan önce uygulanır. Bu nedenle production'a taşınan
+schema değişiklikleri expand/contract yaklaşımıyla geriye uyumlu tutulmalıdır;
+veritabanı migration'ları uygulama rollback'i sırasında otomatik geri alınmaz.
+
+Production CD, aynı immutable staging artifact'lerini kullanacak; GitHub
 Environment onayı, kademeli trafik aktarımı ve başarısız smoke testte otomatik
-rollback ekleyecek.
+rollback ekleyecektir.

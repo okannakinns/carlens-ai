@@ -19,6 +19,7 @@ coverage.*
 # Bicep compilation outputs; source .bicep and .bicepparam files are tracked.
 infra/main.json
 infra/apps.json
+infra/migration-job.json
 infra/environments/*.parameters.json
 
 # -----------------------------------------------------------------------------

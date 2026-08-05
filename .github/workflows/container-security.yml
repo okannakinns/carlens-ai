@@ -86,6 +86,11 @@ jobs:
 
           echo "Declared user: $declared_user (runtime UID:GID $runtime_identity)"
 
+      - name: Verify EF migration bundle
+        if: matrix.service == 'api'
+        shell: bash
+        run: docker run --rm --entrypoint /app/efbundle "$IMAGE_REF" --help > /dev/null
+
       - name: Prepare report directory
         shell: bash
         run: mkdir -p "$REPORT_DIR"
