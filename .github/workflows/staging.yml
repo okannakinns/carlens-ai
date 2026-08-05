@@ -1,0 +1,510 @@
+name: Staging Deployment
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: read
+  deployments: write
+  id-token: write
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+jobs:
+  deploy-staging:
+    name: Deploy staging
+    if: vars.AZURE_DEPLOYMENTS_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment:
+      name: staging
+      url: ${{ steps.deploy-apps.outputs.web_url }}
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      BICEP_VERSION: v0.46.1
+      BICEP_SHA256: 3e011d629ea4311b7a7dd8f0040ab2b1a072ea4ff5d02cb75e0e55a9a6703fb9
+      CARLENS_IMAGE_TAG: sha-${{ github.sha }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout deployment source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate deployment context
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::Staging deployments are restricted to main."
+            exit 1
+          fi
+
+          for variable_name in \
+            AZURE_CLIENT_ID \
+            AZURE_TENANT_ID \
+            AZURE_SUBSCRIPTION_ID \
+            AZURE_RESOURCE_GROUP
+          do
+            if [[ -z "${!variable_name}" ]]; then
+              echo "::error::The staging environment variable ${variable_name} is required."
+              exit 1
+            fi
+          done
+
+          if [[ ! "$CARLENS_IMAGE_TAG" =~ ^sha-[0-9a-f]{40}$ ]]; then
+            echo "::error::Image tags must use the immutable sha-<40 hex characters> format."
+            exit 1
+          fi
+
+      - name: Wait for required quality gates
+        shell: bash
+        run: >-
+          bash .github/scripts/wait-for-required-checks.sh
+          "$GITHUB_REPOSITORY"
+          "$GITHUB_SHA"
+          1800
+
+      - name: Authenticate to Azure with OIDC
+        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve staging registry
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$(az group exists --name "$AZURE_RESOURCE_GROUP")" != "true" ]]; then
+            echo "::error::Resource group ${AZURE_RESOURCE_GROUP} does not exist."
+            exit 1
+          fi
+
+          mapfile -t registry_names < <(
+            az acr list \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --query "[?tags.environment=='staging'].name" \
+              --output tsv \
+              --only-show-errors
+          )
+
+          if (( ${#registry_names[@]} != 1 )); then
+            echo "::error::Expected exactly one staging container registry in ${AZURE_RESOURCE_GROUP}."
+            exit 1
+          fi
+
+          acr_name="${registry_names[0]}"
+          acr_login_server="$(
+            az acr show \
+              --name "$acr_name" \
+              --query loginServer \
+              --output tsv \
+              --only-show-errors
+          )"
+
+          {
+            echo "ACR_NAME=${acr_name}"
+            echo "ACR_LOGIN_SERVER=${acr_login_server}"
+            echo "API_IMAGE=${acr_login_server}/carlens-api:${CARLENS_IMAGE_TAG}"
+            echo "WEB_IMAGE=${acr_login_server}/carlens-web:${CARLENS_IMAGE_TAG}"
+            echo "WORKER_IMAGE=${acr_login_server}/carlens-aiworker:${CARLENS_IMAGE_TAG}"
+          } >> "$GITHUB_ENV"
+
+          for image_specification in \
+            "API|carlens-api" \
+            "WEB|carlens-web" \
+            "WORKER|carlens-aiworker"
+          do
+            IFS='|' read -r variable_prefix repository_name <<< "$image_specification"
+
+            if az acr repository show \
+              --name "$acr_name" \
+              --image "${repository_name}:${CARLENS_IMAGE_TAG}" \
+              --only-show-errors > /dev/null 2>&1
+            then
+              echo "${variable_prefix}_IMAGE_EXISTS=true" >> "$GITHUB_ENV"
+            else
+              echo "${variable_prefix}_IMAGE_EXISTS=false" >> "$GITHUB_ENV"
+            fi
+          done
+
+          az acr login --name "$acr_name" --only-show-errors
+
+      - name: Build or restore API image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$API_IMAGE_EXISTS" == "true" ]]; then
+            docker pull "$API_IMAGE"
+          else
+            docker build \
+              --pull \
+              --file src/Carlens.Api/Dockerfile \
+              --tag "$API_IMAGE" \
+              --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+              --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+              --label "org.opencontainers.image.version=$CARLENS_IMAGE_TAG" \
+              .
+          fi
+
+          docker run --rm --entrypoint /app/efbundle "$API_IMAGE" --help > /dev/null
+
+      - name: Build or restore Web image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$WEB_IMAGE_EXISTS" == "true" ]]; then
+            docker pull "$WEB_IMAGE"
+          else
+            docker build \
+              --pull \
+              --file src/Carlens.Web/Dockerfile \
+              --tag "$WEB_IMAGE" \
+              --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+              --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+              --label "org.opencontainers.image.version=$CARLENS_IMAGE_TAG" \
+              .
+          fi
+
+      - name: Build or restore Worker image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$WORKER_IMAGE_EXISTS" == "true" ]]; then
+            docker pull "$WORKER_IMAGE"
+          else
+            docker build \
+              --pull \
+              --file src/Carlens.AiWorker/Dockerfile \
+              --tag "$WORKER_IMAGE" \
+              --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+              --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+              --label "org.opencontainers.image.version=$CARLENS_IMAGE_TAG" \
+              .
+          fi
+
+      - name: Verify image provenance and runtime identity
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          expected_source="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+
+          for image_reference in "$API_IMAGE" "$WEB_IMAGE" "$WORKER_IMAGE"; do
+            image_source="$(
+              docker image inspect \
+                --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' \
+                "$image_reference"
+            )"
+            image_revision="$(
+              docker image inspect \
+                --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+                "$image_reference"
+            )"
+            image_version="$(
+              docker image inspect \
+                --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' \
+                "$image_reference"
+            )"
+            declared_user="$(docker image inspect --format '{{.Config.User}}' "$image_reference")"
+            runtime_uid="$(docker run --rm --entrypoint id "$image_reference" -u)"
+            runtime_gid="$(docker run --rm --entrypoint id "$image_reference" -g)"
+
+            if [[ "$image_source" != "$expected_source" || \
+                  "$image_revision" != "$GITHUB_SHA" || \
+                  "$image_version" != "$CARLENS_IMAGE_TAG" ]]
+            then
+              echo "::error::Image ${image_reference} has invalid provenance labels."
+              exit 1
+            fi
+
+            if [[ -z "$declared_user" || "$runtime_uid" == "0" || "$runtime_gid" == "0" ]]; then
+              echo "::error::Image ${image_reference} must run as a declared non-root user."
+              exit 1
+            fi
+          done
+
+      - name: Scan API image before publication
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.API_IMAGE }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          scanners: vuln
+          version: v0.73.0
+          cache: false
+
+      - name: Scan Web image before publication
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.WEB_IMAGE }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          scanners: vuln
+          skip-setup-trivy: true
+          cache: false
+
+      - name: Scan Worker image before publication
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.WORKER_IMAGE }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          scanners: vuln
+          skip-setup-trivy: true
+          cache: false
+
+      - name: Publish and lock immutable images
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for image_specification in \
+            "carlens-api|$API_IMAGE|$API_IMAGE_EXISTS" \
+            "carlens-web|$WEB_IMAGE|$WEB_IMAGE_EXISTS" \
+            "carlens-aiworker|$WORKER_IMAGE|$WORKER_IMAGE_EXISTS"
+          do
+            IFS='|' read -r repository_name image_reference image_exists \
+              <<< "$image_specification"
+
+            if [[ "$image_exists" != "true" ]]; then
+              docker push "$image_reference"
+            fi
+
+            az acr repository update \
+              --name "$ACR_NAME" \
+              --image "${repository_name}:${CARLENS_IMAGE_TAG}" \
+              --write-enabled false \
+              --delete-enabled false \
+              --output none \
+              --only-show-errors
+
+            image_lock="$(
+              az acr repository show \
+                --name "$ACR_NAME" \
+                --image "${repository_name}:${CARLENS_IMAGE_TAG}" \
+                --query '[changeableAttributes.writeEnabled, changeableAttributes.deleteEnabled]' \
+                --output tsv \
+                --only-show-errors
+            )"
+
+            if [[ "$image_lock" != $'false\tfalse' ]]; then
+              echo "::error::Image ${repository_name}:${CARLENS_IMAGE_TAG} is not immutable."
+              exit 1
+            fi
+          done
+
+      - name: Compile deployment templates
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          bicep_cli="$RUNNER_TEMP/bicep"
+          bash .github/scripts/install-bicep.sh "$bicep_cli"
+
+          "$bicep_cli" build infra/migration-job.bicep \
+            --outfile "$RUNNER_TEMP/migration-job.json"
+          "$bicep_cli" build infra/apps.bicep \
+            --outfile "$RUNNER_TEMP/apps.json"
+          "$bicep_cli" build-params infra/environments/staging.migration.bicepparam \
+            --outfile "$RUNNER_TEMP/staging.migration.parameters.json"
+          "$bicep_cli" build-params infra/environments/staging.apps.bicepparam \
+            --outfile "$RUNNER_TEMP/staging.apps.parameters.json"
+
+      - name: Deploy migration job definition
+        id: deploy-migration-job
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          deployment_file="$RUNNER_TEMP/migration-deployment.json"
+          az deployment group create \
+            --name "migration-stg-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --template-file "$RUNNER_TEMP/migration-job.json" \
+            --parameters "@$RUNNER_TEMP/staging.migration.parameters.json" \
+            --mode Incremental \
+            --only-show-errors \
+            --output json > "$deployment_file"
+
+          migration_job_name="$(jq --raw-output '.properties.outputs.jobName.value' "$deployment_file")"
+          migration_image="$(jq --raw-output '.properties.outputs.imageReference.value' "$deployment_file")"
+
+          if [[ -z "$migration_job_name" || "$migration_job_name" == "null" ]]; then
+            echo "::error::Migration deployment did not return a job name."
+            exit 1
+          fi
+
+          if [[ "$migration_image" != "$API_IMAGE" ]]; then
+            echo "::error::Migration job does not reference the expected API image."
+            exit 1
+          fi
+
+          echo "job_name=${migration_job_name}" >> "$GITHUB_OUTPUT"
+
+      - name: Apply EF Core migrations
+        shell: bash
+        env:
+          MIGRATION_JOB_NAME: ${{ steps.deploy-migration-job.outputs.job_name }}
+        run: |
+          set -euo pipefail
+
+          execution_name="$(
+            az containerapp job start \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$MIGRATION_JOB_NAME" \
+              --query name \
+              --output tsv \
+              --only-show-errors
+          )"
+
+          if [[ -z "$execution_name" ]]; then
+            echo "::error::Azure did not return a migration execution name."
+            exit 1
+          fi
+
+          bash .github/scripts/wait-for-container-app-job.sh \
+            "$AZURE_RESOURCE_GROUP" \
+            "$MIGRATION_JOB_NAME" \
+            "$execution_name" \
+            1200
+
+      - name: Deploy staging applications
+        id: deploy-apps
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          deployment_file="$RUNNER_TEMP/apps-deployment.json"
+          az deployment group create \
+            --name "apps-stg-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --template-file "$RUNNER_TEMP/apps.json" \
+            --parameters "@$RUNNER_TEMP/staging.apps.parameters.json" \
+            --mode Incremental \
+            --only-show-errors \
+            --output json > "$deployment_file"
+
+          web_fqdn="$(jq --raw-output '.properties.outputs.webFqdn.value' "$deployment_file")"
+
+          if [[ -z "$web_fqdn" || "$web_fqdn" == "null" ]]; then
+            echo "::error::Application deployment did not return the Web FQDN."
+            exit 1
+          fi
+
+          echo "web_url=https://${web_fqdn}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify deployed revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          app_specifications=(
+            "ca-carlens-api-stg|$API_IMAGE"
+            "ca-carlens-web-stg|$WEB_IMAGE"
+            "ca-carlens-worker-stg|$WORKER_IMAGE"
+          )
+          deadline=$((SECONDS + 600))
+
+          while (( SECONDS < deadline )); do
+            all_ready=true
+
+            for app_specification in "${app_specifications[@]}"; do
+              IFS='|' read -r app_name expected_image <<< "$app_specification"
+              app_state="$(
+                az containerapp show \
+                  --resource-group "$AZURE_RESOURCE_GROUP" \
+                  --name "$app_name" \
+                  --query '[properties.provisioningState, properties.latestRevisionName, properties.latestReadyRevisionName, properties.template.containers[0].image]' \
+                  --output tsv \
+                  --only-show-errors
+              )"
+              IFS=$'\t' read -r provisioning_state latest_revision ready_revision actual_image \
+                <<< "$app_state"
+
+              if [[ "$provisioning_state" == "Failed" ]]; then
+                echo "::error::Container App ${app_name} failed to provision."
+                exit 1
+              fi
+
+              if [[ "$actual_image" != "$expected_image" ]]; then
+                echo "::error::Container App ${app_name} references an unexpected image."
+                exit 1
+              fi
+
+              if [[ "$provisioning_state" != "Succeeded" || \
+                    -z "$latest_revision" || \
+                    "$latest_revision" != "$ready_revision" ]]
+              then
+                all_ready=false
+              fi
+            done
+
+            if [[ "$all_ready" == "true" ]]; then
+              echo "All staging revisions are ready."
+              exit 0
+            fi
+
+            sleep 10
+          done
+
+          echo "::error::Staging revisions did not become ready within 600 seconds."
+          exit 1
+
+      - name: Run staging health and smoke tests
+        shell: bash
+        env:
+          WEB_URL: ${{ steps.deploy-apps.outputs.web_url }}
+        run: bash .github/scripts/smoke-test.sh "$WEB_URL"
+
+      - name: Write deployment summary
+        if: success()
+        shell: bash
+        env:
+          WEB_URL: ${{ steps.deploy-apps.outputs.web_url }}
+        run: |
+          {
+            echo "## Staging deployment"
+            echo
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Image tag: \`${CARLENS_IMAGE_TAG}\`"
+            echo "- Resource group: \`${AZURE_RESOURCE_GROUP}\`"
+            echo "- Web URL: ${WEB_URL}"
+            echo "- Migration: succeeded"
+            echo "- Health and smoke tests: passed"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove temporary deployment parameters
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP"/*.parameters.json
+
+      - name: Sign out from Azure
+        if: always()
+        shell: bash
+        run: az logout || true

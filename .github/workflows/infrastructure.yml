@@ -22,6 +22,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
       BICEP_VERSION: v0.46.1
       BICEP_SHA256: 3e011d629ea4311b7a7dd8f0040ab2b1a072ea4ff5d02cb75e0e55a9a6703fb9
       CARLENS_IMAGE_TAG: sha-0123456789abcdef0123456789abcdef01234567
@@ -38,12 +40,29 @@ jobs:
         run: |
           set -euo pipefail
 
+          bicep_cli="$RUNNER_TEMP/bicep"
+          bash .github/scripts/install-bicep.sh "$bicep_cli"
+          echo "BICEP_CLI=${bicep_cli}" >> "$GITHUB_ENV"
+
+      - name: Validate deployment scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n .github/scripts/*.sh
+          shellcheck .github/scripts/*.sh
+
+      - name: Validate GitHub Actions workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          archive="$RUNNER_TEMP/actionlint.tar.gz"
           curl --fail --location --silent --show-error \
-            "https://github.com/Azure/bicep/releases/download/${BICEP_VERSION}/bicep-linux-x64" \
-            --output /tmp/bicep
-          echo "${BICEP_SHA256}  /tmp/bicep" | sha256sum --check
-          chmod +x /tmp/bicep
-          echo "BICEP_CLI=/tmp/bicep" >> "$GITHUB_ENV"
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            --output "$archive"
+          echo "${ACTIONLINT_SHA256}  ${archive}" | sha256sum --check
+          tar --extract --gzip --file "$archive" --directory "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
 
       - name: Validate immutable image tag
         shell: bash
@@ -59,6 +78,7 @@ jobs:
           set -euo pipefail
           "$BICEP_CLI" lint infra/main.bicep
           "$BICEP_CLI" lint infra/apps.bicep
+          "$BICEP_CLI" lint infra/migration-job.bicep
 
       - name: Compile ARM templates
         shell: bash
@@ -69,6 +89,8 @@ jobs:
             --outfile artifacts/arm/foundation.json
           "$BICEP_CLI" build infra/apps.bicep \
             --outfile artifacts/arm/apps.json
+          "$BICEP_CLI" build infra/migration-job.bicep \
+            --outfile artifacts/arm/migration-job.json
 
       - name: Compile environment parameters
         shell: bash
@@ -79,7 +101,9 @@ jobs:
             infra/environments/staging.foundation.bicepparam \
             infra/environments/production.foundation.bicepparam \
             infra/environments/staging.apps.bicepparam \
-            infra/environments/production.apps.bicepparam
+            infra/environments/production.apps.bicepparam \
+            infra/environments/staging.migration.bicepparam \
+            infra/environments/production.migration.bicepparam
           do
             output_file="/tmp/$(basename "$parameter_file" .bicepparam).parameters.json"
             "$BICEP_CLI" build-params "$parameter_file" --outfile "$output_file"
@@ -131,6 +155,24 @@ jobs:
           jq --exit-status \
             '[.outputs | keys[] | ascii_downcase | select(test("secret|password|connectionstring|apikey"))] | length == 0' \
             artifacts/arm/apps.json > /dev/null
+          jq --exit-status \
+            '.parameters.imageTag.minLength == 44 and .parameters.imageTag.maxLength == 44' \
+            artifacts/arm/migration-job.json > /dev/null
+          jq --exit-status \
+            '[.resources[] | select(.type == "Microsoft.App/jobs" and .properties.configuration.triggerType == "Manual")] | length == 1' \
+            artifacts/arm/migration-job.json > /dev/null
+          jq --exit-status \
+            '[.resources[] | select(.type == "Microsoft.App/jobs") | .properties.configuration.identitySettings[] | select(.lifecycle == "None")] | length == 1' \
+            artifacts/arm/migration-job.json > /dev/null
+          jq --exit-status \
+            '[.resources[] | select(.type == "Microsoft.App/jobs") | .properties.configuration.secrets[] | has("value")] | any | not' \
+            artifacts/arm/migration-job.json > /dev/null
+          jq --exit-status \
+            '[.resources[] | select(.type == "Microsoft.App/jobs") | .properties.template.containers[] | select(.command == ["/app/efbundle"]) | .env[] | select(.name == "ConnectionStrings__Postgres" and .secretRef == "postgres-connection-string")] | length == 1' \
+            artifacts/arm/migration-job.json > /dev/null
+          jq --exit-status \
+            '[.outputs | keys[] | ascii_downcase | select(test("secret|password|connectionstring|apikey"))] | length == 0' \
+            artifacts/arm/migration-job.json > /dev/null
 
           if grep --recursive --line-number --fixed-strings ':latest' infra; then
             echo "::error::Mutable latest image tags are not allowed in infrastructure definitions."

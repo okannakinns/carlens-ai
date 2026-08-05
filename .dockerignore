@@ -1,4 +1,6 @@
 **
+!.config/
+!.config/dotnet-tools.json
 !src/
 !src/**
 
