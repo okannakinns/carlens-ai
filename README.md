@@ -169,7 +169,7 @@ Projede CQRS için gereksiz bir framework bağımlılığı eklenmemiş, handler
 | **Trivy + CycloneDX** | Production container image taraması ve SBOM üretimi | Düzeltilmiş `HIGH`/`CRITICAL` açıkları merge öncesinde engellemek, image içeriğini makine tarafından okunabilir biçimde envanterlemek ve SARIF sonuçlarını GitHub Code Scanning’e taşımak |
 | **xUnit + NetArchTest** | Unit testler ve Clean Architecture sınırları | Kritik davranışları hızlı doğrulamak ve yasak katman bağımlılıklarının zamanla geri gelmesini önlemek |
 | **Testcontainers** | PostgreSQL, Redis ve RabbitMQ integration testleri | Mock yerine gerçek servisleri geçici Docker container’larında çalıştırarak production’a daha yakın ve tekrarlanabilir doğrulama yapmak |
-| **GitHub Actions + CodeQL + Dependabot** | CI kalite kapıları, statik güvenlik analizi ve bağımlılık takibi | Pull request’lerde build, unit/architecture/integration testleri, migration kontrolü ve frontend build’ini zorunlu doğrulamak |
+| **GitHub Actions + CodeQL + Dependabot** | CI/CD kalite kapıları, güvenlik analizi ve bağımlılık takibi | Pull request’lerde build/test kontrollerini zorunlu kılmak; staging’i otomatik, production’ı onaylı blue-green akışla dağıtmak |
 
 ## 💸 AI Maliyet Optimizasyonu
 
@@ -225,7 +225,7 @@ CarlensAI.sln
 │   └── screenshots             # README ürün ekranları
 ├── infra                       # Bicep modülleri ve staging/production parametreleri
 ├── .github
-│   ├── workflows              # CI, güvenlik, Bicep doğrulama, staging CD ve CodeQL
+│   ├── workflows              # CI, güvenlik, Bicep doğrulama, staging/production CD ve CodeQL
 │   └── dependabot.yml
 └── docker-compose.yml
 ```
@@ -381,9 +381,11 @@ GitHub Actions, `main` hedefli her pull request’te ve `main` branch’ine yap�
 
 Ayrı container güvenliği workflow’u API, Web ve Worker production image’larını immutable Git SHA etiketleriyle oluşturur, runtime kullanıcısının root olmadığını doğrular ve Trivy ile düzeltilmiş `HIGH`/`CRITICAL` açıkları merge öncesinde engeller. Her image için CycloneDX SBOM ve SARIF raporu üretilir; raporlar workflow artifact’i olarak saklanır ve `main` push’larında GitHub Code Scanning’e yüklenir. CodeQL, C# ve JavaScript/TypeScript kaynaklarını tarar; Dependabot ise NuGet, npm, Docker ve GitHub Actions bağımlılıklarını haftalık olarak takip eder.
 
-Infrastructure workflow’u checksum ile doğrulanmış sabit Bicep CLI ve Actionlint sürümlerini kullanır; ShellCheck ile deployment scriptlerini, Actionlint ile workflow’ları, ayrıca foundation, application, migration job ve altı ortam parametre dosyasını doğrular. Secure PostgreSQL parametresi, immutable image etiketi, üç Container App tanımı, manuel ve tek replica EF migration job’u ile secret içermeyen output sözleşmesi ARM şablonları üzerinde kalite kapısı olarak sınanır.
+Infrastructure workflow’u checksum ile doğrulanmış sabit Bicep CLI ve Actionlint sürümlerini kullanır; ShellCheck ile deployment scriptlerini, Actionlint ile workflow’ları, ayrıca foundation, application, migration job ve altı ortam parametre dosyasını doğrular. Secure PostgreSQL parametresi, immutable image etiketi, blue-green trafik sözleşmesi, koşullu Worker rollout’u, manuel ve tek replica EF migration job’u ile secret içermeyen output sözleşmesi ARM şablonları üzerinde kalite kapısı olarak sınanır.
 
 Staging CD, protected `main` branch’indeki zorunlu kalite kontrollerini bekledikten sonra OIDC ile Azure’a bağlanır. API, Web ve Worker image’larını yeniden tarayıp immutable Git SHA etiketiyle ACR’a gönderir ve kilitler; EF Core migration job’unu çalıştırdıktan sonra Container Apps revision’larını dağıtır. Live/readiness kontrollerinin yanında SPA, HSTS ve Web üzerinden API gateway smoke testi de deployment kalite kapısıdır. Azure erişimi client secret içermez ve pipeline yalnızca `AZURE_DEPLOYMENTS_ENABLED=true` olduğunda etkinleşir.
+
+Production CD yalnızca GitHub `production` Environment onayından sonra manuel olarak başlatılır. Başarılı staging deployment’ına ait kilitli image digest’lerini yeniden build etmeden production ACR’a taşır, geriye uyumlu migration job’unu çalıştırır ve yeni API/Web revision’larını önce `%0` trafikle doğrular. Trafik `%5 → %25 → %50 → %100` şeklinde readiness ve smoke test kapılarıyla ilerler; herhangi bir kapı başarısız olursa önceki revision’lara otomatik rollback uygulanır. RabbitMQ mesajlarının iki Worker sürümü tarafından eşzamanlı tüketilmemesi için Worker yalnızca HTTP trafiği tamamen aktarıldıktan sonra Single revision modunda güncellenir.
 
 ## 🎯 Bu Projede Sergilenen Yetkinlikler
 
@@ -399,6 +401,7 @@ Staging CD, protected `main` branch’indeki zorunlu kalite kontrollerini bekled
 - Rootless container image’ları, Trivy vulnerability gate, CycloneDX SBOM ve SARIF raporlama
 - Bicep ile modüler Azure IaC, private endpoint, managed identity ve least-privilege RBAC
 - GitHub OIDC, immutable ACR artifact’leri, migration job ve smoke testlerle otomatik staging CD
+- GitHub Environment onayı, kademeli trafik aktarımı ve otomatik rollback ile production blue-green CD
 - Application Insights ve OpenTelemetry ile merkezi trace, metric ve log korelasyonu
 - OpenAI ile çok modlu ve JSON Schema tabanlı yapılandırılmış çıktı
 - Playwright ile dinamik web verisi okuma
@@ -415,7 +418,6 @@ Staging CD, protected `main` branch’indeki zorunlu kalite kontrollerini bekled
 - Kaydedilebilir ve paylaşılabilir analiz raporları
 - Kimlik doğrulama sonrası kullanıcı ve abonelik bazlı kota politikaları
 - Retry politikası, dead-letter queue ve gelişmiş mesaj gözlemlenebilirliği
-- Production blue-green trafik aktarımı ve otomatik rollback
 
 ## ⚖️ Yasal ve Teknik Uyarı
 
