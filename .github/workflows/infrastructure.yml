@@ -122,9 +122,46 @@ jobs:
           jq --exit-status \
             '.parameters.imageTag.minLength == 44 and .parameters.imageTag.maxLength == 44' \
             artifacts/arm/apps.json > /dev/null
+          jq --exit-status '
+            .parameters.stableApiRevisionName.defaultValue == "" and
+            .parameters.stableWebRevisionName.defaultValue == "" and
+            .parameters.deployWorker.defaultValue == true
+          ' artifacts/arm/apps.json > /dev/null
           jq --exit-status \
             '[.resources[] | select(.type == "Microsoft.App/containerApps")] | length == 3' \
             artifacts/arm/apps.json > /dev/null
+          jq --exit-status '
+            [.resources[] |
+              select(.type == "Microsoft.App/containerApps") |
+              select((.condition // "") | contains("deployWorker")) |
+              select(.properties.configuration.activeRevisionsMode == "Single")
+            ] | length == 1
+          ' artifacts/arm/apps.json > /dev/null
+          jq --exit-status '
+            ([.resources[] |
+                select(.type == "Microsoft.App/containerApps") |
+                select(.properties.template.containers[0].name == "api") |
+                .properties.configuration.ingress |
+                strings |
+                select(contains("apiTraffic"))
+              ] | length) == 1 and
+            ([.resources[] |
+                select(.type == "Microsoft.App/containerApps") |
+                select(.properties.template.containers[0].name == "web") |
+                .properties.configuration.ingress |
+                strings |
+                select(contains("webTraffic"))
+              ] | length) == 1
+          ' artifacts/arm/apps.json > /dev/null
+          jq --exit-status '
+            (.variables.apiTraffic | contains("candidate")) and
+            (.variables.apiTraffic | contains("100")) and
+            (.variables.apiTraffic | contains("0")) and
+            (.variables.webTraffic | contains("candidate")) and
+            (.variables.webTraffic | contains("100")) and
+            (.variables.webTraffic | contains("0")) and
+            (.outputs.candidateWebFqdn.value | contains("---candidate"))
+          ' artifacts/arm/apps.json > /dev/null
           jq --exit-status \
             '[.resources[] | select(.type == "Microsoft.App/containerApps" and .properties.configuration.ingress != null) | .properties.configuration.ingress.external] | sort == [false, true]' \
             artifacts/arm/apps.json > /dev/null

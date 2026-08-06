@@ -177,6 +177,58 @@ Migration, yeni revision'lardan önce uygulanır. Bu nedenle production'a taşı
 schema değişiklikleri expand/contract yaklaşımıyla geriye uyumlu tutulmalıdır;
 veritabanı migration'ları uygulama rollback'i sırasında otomatik geri alınmaz.
 
-Production CD, aynı immutable staging artifact'lerini kullanacak; GitHub
-Environment onayı, kademeli trafik aktarımı ve başarısız smoke testte otomatik
-rollback ekleyecektir.
+## Production Blue-Green CD
+
+`.github/workflows/production.yml` yalnızca `main` branch'i üzerinden manuel
+olarak çalıştırılır ve protected `production` GitHub Environment onayı bekler.
+Workflow'a production'a alınacak, staging deployment'ı başarıyla tamamlanmış tam
+40 karakterlik commit SHA'sı verilir. Pipeline zorunlu kalite kontrollerini ve o
+commit'e ait başarılı staging deployment kaydını yeniden doğrular.
+
+Production image'ları tekrar build edilmez. Staging ACR'daki yazma ve silmeye
+karşı kilitli API, Web ve Worker manifestleri digest üzerinden ayrı production
+ACR'a import edilir; hedef digest'in kaynakla birebir aynı olduğu doğrulanıp hedef
+etiket de kilitlenir. Böylece staging'de test edilen artifact production'a taşınır.
+
+Migration job yeni revision'lardan önce çalışır. Mevcut production ortamında yeni
+API ve Web revision'ları `candidate` etiketi ve `%0` trafikle oluşturulur. Aday
+revision FQDN'i üzerinden smoke test geçtikten sonra trafik `%5`, `%25`, `%50` ve
+`%100` olarak aktarılır. Her aşamada gözlem süresi, revision readiness kontrolü ve
+tekrarlı production smoke testi bulunur. Herhangi bir kontrol başarısız olursa API
+ve Web trafiği önceki stable revision'lara döner, revision etiketleri onarılır ve
+Worker önceki image'a geri alınır. Rollback sonrasında yeniden smoke test yapılır.
+
+Worker, iki RabbitMQ consumer sürümünün aynı anda çalışmasını önlemek için HTTP
+trafiği `%100` adaya geçmeden güncellenmez ve `Single` revision modunda tutulur.
+İlk production kurulumu için eski revision bulunmadığından workflow kontrollü bir
+bootstrap uygular; üç uygulamayı readiness ve smoke testlerden sonra `%100`
+trafikle devreye alır.
+
+GitHub'da `production` Environment'ını required reviewer ve yalnızca protected
+branch deployment politikasıyla yapılandırın. Aşağıdaki environment variable'ları
+tanımlanmalıdır:
+
+| Variable | Açıklama |
+|---|---|
+| `AZURE_CLIENT_ID` | Production deployment kimliğinin application/client ID değeri |
+| `AZURE_TENANT_ID` | Microsoft Entra tenant ID değeri |
+| `AZURE_SUBSCRIPTION_ID` | Azure subscription ID değeri |
+| `AZURE_RESOURCE_GROUP` | Varsayılan kurulumda `rg-carlens-production` |
+| `AZURE_STAGING_RESOURCE_GROUP` | Varsayılan kurulumda `rg-carlens-staging` |
+
+Production deployment kimliği için client secret yerine aşağıdaki GitHub OIDC
+subject'ine sahip federated credential kullanılır:
+
+```text
+repo:okannakinns/carlens-ai:environment:production
+```
+
+Kimlik production resource group üzerinde `Contributor`, staging ACR üzerinde
+`AcrPull` ve production ACR üzerinde `AcrPush` rollerine sahip olmalıdır. GitHub
+Actions'ta **Production Blue-Green Deployment** workflow'unu `main` üzerinden
+çalıştırıp başarılı staging commit SHA'sını ve gözlem süresini seçin.
+
+`AZURE_DEPLOYMENTS_ENABLED=true` yalnızca iki Azure ortamı, Key Vault secret'ları,
+OIDC federated credential'ları ve roller hazırlandıktan sonra ayarlanmalıdır.
+Migration'lar expand/contract yaklaşımıyla geriye uyumlu olmalıdır; uygulama
+rollback'i veritabanı migration'ını otomatik olarak geri almaz.

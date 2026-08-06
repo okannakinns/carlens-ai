@@ -18,6 +18,17 @@ param imageTag string
 @description('Container Apps revision mode. Production uses Multiple for blue-green traffic control.')
 param activeRevisionsMode string
 
+@maxLength(64)
+@description('Current API revision receiving production traffic. Leave empty for staging and the first production deployment.')
+param stableApiRevisionName string = ''
+
+@maxLength(64)
+@description('Current Web revision receiving production traffic. Leave empty for staging and the first production deployment.')
+param stableWebRevisionName string = ''
+
+@description('Whether this deployment should create or update the Worker revision.')
+param deployWorker bool = true
+
 @minValue(1)
 param apiMinReplicas int
 
@@ -63,6 +74,45 @@ var commonTags = union(
   tags
 )
 var revisionSuffix = 'sha-${substring(imageTag, 4, 12)}'
+var candidateApiRevisionName = '${resourceNames.api}--${revisionSuffix}'
+var candidateWebRevisionName = '${resourceNames.web}--${revisionSuffix}'
+var candidateWorkerRevisionName = '${resourceNames.worker}--${revisionSuffix}'
+var apiTraffic = empty(stableApiRevisionName) ? [
+  {
+    label: 'stable'
+    revisionName: candidateApiRevisionName
+    weight: 100
+  }
+] : [
+  {
+    label: 'stable'
+    revisionName: stableApiRevisionName
+    weight: 100
+  }
+  {
+    label: 'candidate'
+    revisionName: candidateApiRevisionName
+    weight: 0
+  }
+]
+var webTraffic = empty(stableWebRevisionName) ? [
+  {
+    label: 'stable'
+    revisionName: candidateWebRevisionName
+    weight: 100
+  }
+] : [
+  {
+    label: 'stable'
+    revisionName: stableWebRevisionName
+    weight: 100
+  }
+  {
+    label: 'candidate'
+    revisionName: candidateWebRevisionName
+    weight: 0
+  }
+]
 
 resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2026-01-01' existing = {
   name: resourceNames.containerAppsEnvironment
@@ -113,12 +163,17 @@ resource api 'Microsoft.App/containerApps@2026-01-01' = {
           lifecycle: 'None'
         }
       ]
-      ingress: {
-        allowInsecure: false
-        external: false
-        targetPort: 8080
-        transport: 'auto'
-      }
+      ingress: union(
+        {
+          allowInsecure: false
+          external: false
+          targetPort: 8080
+          transport: 'auto'
+        },
+        activeRevisionsMode == 'Multiple' ? {
+          traffic: apiTraffic
+        } : {}
+      )
       maxInactiveRevisions: 10
       registries: [
         {
@@ -274,12 +329,17 @@ resource web 'Microsoft.App/containerApps@2026-01-01' = {
           lifecycle: 'None'
         }
       ]
-      ingress: {
-        allowInsecure: false
-        external: true
-        targetPort: 8080
-        transport: 'auto'
-      }
+      ingress: union(
+        {
+          allowInsecure: false
+          external: true
+          targetPort: 8080
+          transport: 'auto'
+        },
+        activeRevisionsMode == 'Multiple' ? {
+          traffic: webTraffic
+        } : {}
+      )
       maxInactiveRevisions: 10
       registries: [
         {
@@ -400,7 +460,7 @@ resource web 'Microsoft.App/containerApps@2026-01-01' = {
   }
 }
 
-resource worker 'Microsoft.App/containerApps@2026-01-01' = {
+resource worker 'Microsoft.App/containerApps@2026-01-01' = if (deployWorker) {
   name: resourceNames.worker
   location: resourceGroup().location
   tags: commonTags
@@ -529,7 +589,16 @@ resource worker 'Microsoft.App/containerApps@2026-01-01' = {
 
 output apiName string = api.name
 output apiFqdn string = api.properties.configuration.ingress.fqdn
+output apiImageReference string = '${registry.properties.loginServer}/carlens-api:${imageTag}'
+output apiRevisionName string = candidateApiRevisionName
 output webName string = web.name
 output webFqdn string = web.properties.configuration.ingress.fqdn
-output workerName string = worker.name
+output webImageReference string = '${registry.properties.loginServer}/carlens-web:${imageTag}'
+output webRevisionName string = candidateWebRevisionName
+output candidateWebFqdn string = activeRevisionsMode == 'Multiple' && !empty(stableWebRevisionName)
+  ? replace(web.properties.configuration.ingress.fqdn, '${web.name}.', '${web.name}---candidate.')
+  : web.properties.configuration.ingress.fqdn
+output workerName string = resourceNames.worker
+output workerImageReference string = '${registry.properties.loginServer}/carlens-aiworker:${imageTag}'
+output workerRevisionName string = candidateWorkerRevisionName
 output revisionSuffix string = revisionSuffix

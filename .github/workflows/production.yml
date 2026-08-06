@@ -1,0 +1,880 @@
+name: Production Blue-Green Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Full commit SHA that completed a successful staging deployment
+        required: true
+        type: string
+      observation_seconds:
+        description: Observation time after each traffic step
+        required: true
+        default: "60"
+        type: choice
+        options:
+          - "60"
+          - "120"
+          - "300"
+
+permissions:
+  contents: read
+  checks: read
+  deployments: write
+  id-token: write
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy-production:
+    name: Deploy production
+    if: vars.AZURE_DEPLOYMENTS_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    environment:
+      name: production
+      url: ${{ steps.deploy-candidate.outputs.web_url }}
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      AZURE_STAGING_RESOURCE_GROUP: ${{ vars.AZURE_STAGING_RESOURCE_GROUP }}
+      BICEP_VERSION: v0.46.1
+      BICEP_SHA256: 3e011d629ea4311b7a7dd8f0040ab2b1a072ea4ff5d02cb75e0e55a9a6703fb9
+      CARLENS_RELEASE_SHA: ${{ inputs.release_sha }}
+      CARLENS_IMAGE_TAG: sha-${{ inputs.release_sha }}
+      OBSERVATION_SECONDS: ${{ inputs.observation_seconds }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout deployment source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate production release request
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::Production deployments are restricted to main."
+            exit 1
+          fi
+
+          for variable_name in \
+            AZURE_CLIENT_ID \
+            AZURE_TENANT_ID \
+            AZURE_SUBSCRIPTION_ID \
+            AZURE_RESOURCE_GROUP \
+            AZURE_STAGING_RESOURCE_GROUP
+          do
+            if [[ -z "${!variable_name}" ]]; then
+              echo "::error::The production environment variable ${variable_name} is required."
+              exit 1
+            fi
+          done
+
+          if [[ ! "$CARLENS_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::release_sha must be a full lowercase 40-character commit SHA."
+            exit 1
+          fi
+
+          if [[ ! "$CARLENS_IMAGE_TAG" =~ ^sha-[0-9a-f]{40}$ ]]; then
+            echo "::error::Production images must use an immutable Git SHA tag."
+            exit 1
+          fi
+
+          case "$OBSERVATION_SECONDS" in
+            60|120|300) ;;
+            *)
+              echo "::error::Unsupported observation interval."
+              exit 1
+              ;;
+          esac
+
+          if ! git cat-file -e "${CARLENS_RELEASE_SHA}^{commit}"; then
+            echo "::error::The selected release commit does not exist in this repository."
+            exit 1
+          fi
+
+          if ! git merge-base --is-ancestor "$CARLENS_RELEASE_SHA" "$GITHUB_SHA"; then
+            echo "::error::The selected release must be an ancestor of the current main commit."
+            exit 1
+          fi
+
+          candidate_suffix="sha-${CARLENS_RELEASE_SHA:0:12}"
+          rollback_suffix="rollback-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          {
+            echo "API_APP=ca-carlens-api-prod"
+            echo "WEB_APP=ca-carlens-web-prod"
+            echo "WORKER_APP=ca-carlens-worker-prod"
+            echo "CANDIDATE_SUFFIX=${candidate_suffix}"
+            echo "CANDIDATE_API_REVISION=ca-carlens-api-prod--${candidate_suffix}"
+            echo "CANDIDATE_WEB_REVISION=ca-carlens-web-prod--${candidate_suffix}"
+            echo "CANDIDATE_WORKER_REVISION=ca-carlens-worker-prod--${candidate_suffix}"
+            echo "ROLLBACK_SUFFIX=${rollback_suffix}"
+          } >> "$GITHUB_ENV"
+
+      - name: Verify release quality gates
+        shell: bash
+        run: >-
+          bash .github/scripts/wait-for-required-checks.sh
+          "$GITHUB_REPOSITORY"
+          "$CARLENS_RELEASE_SHA"
+          1800
+
+      - name: Verify successful staging deployment
+        shell: bash
+        run: >-
+          bash .github/scripts/verify-staging-deployment.sh
+          "$GITHUB_REPOSITORY"
+          "$CARLENS_RELEASE_SHA"
+
+      - name: Authenticate to Azure with OIDC
+        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve staging and production registries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for resource_group in "$AZURE_STAGING_RESOURCE_GROUP" "$AZURE_RESOURCE_GROUP"; do
+            if [[ "$(az group exists --name "$resource_group")" != "true" ]]; then
+              echo "::error::Resource group ${resource_group} does not exist."
+              exit 1
+            fi
+          done
+
+          resolve_registry() {
+            local resource_group="$1"
+            local environment_name="$2"
+            local registry_names=()
+
+            mapfile -t registry_names < <(
+              az acr list \
+                --resource-group "$resource_group" \
+                --query "[?tags.environment=='${environment_name}'].name" \
+                --output tsv \
+                --only-show-errors
+            )
+
+            if (( ${#registry_names[@]} != 1 )); then
+              echo "::error::Expected one ${environment_name} registry in ${resource_group}." >&2
+              return 1
+            fi
+
+            printf '%s' "${registry_names[0]}"
+          }
+
+          source_acr_name="$(resolve_registry "$AZURE_STAGING_RESOURCE_GROUP" staging)"
+          target_acr_name="$(resolve_registry "$AZURE_RESOURCE_GROUP" production)"
+
+          if [[ "$source_acr_name" == "$target_acr_name" ]]; then
+            echo "::error::Staging and production must use separate registries."
+            exit 1
+          fi
+
+          source_acr_login_server="$(
+            az acr show \
+              --name "$source_acr_name" \
+              --query loginServer \
+              --output tsv \
+              --only-show-errors
+          )"
+          target_acr_login_server="$(
+            az acr show \
+              --name "$target_acr_name" \
+              --query loginServer \
+              --output tsv \
+              --only-show-errors
+          )"
+
+          {
+            echo "SOURCE_ACR_NAME=${source_acr_name}"
+            echo "SOURCE_ACR_LOGIN_SERVER=${source_acr_login_server}"
+            echo "TARGET_ACR_NAME=${target_acr_name}"
+            echo "TARGET_ACR_LOGIN_SERVER=${target_acr_login_server}"
+            echo "API_IMAGE=${target_acr_login_server}/carlens-api:${CARLENS_IMAGE_TAG}"
+            echo "WEB_IMAGE=${target_acr_login_server}/carlens-web:${CARLENS_IMAGE_TAG}"
+            echo "WORKER_IMAGE=${target_acr_login_server}/carlens-aiworker:${CARLENS_IMAGE_TAG}"
+          } >> "$GITHUB_ENV"
+
+      - name: Promote immutable staging artifacts
+        shell: bash
+        run: >-
+          bash .github/scripts/promote-acr-images.sh
+          "$SOURCE_ACR_NAME"
+          "$SOURCE_ACR_LOGIN_SERVER"
+          "$TARGET_ACR_NAME"
+          "$CARLENS_IMAGE_TAG"
+
+      - name: Compile production deployment templates
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          bicep_cli="$RUNNER_TEMP/bicep"
+          bash .github/scripts/install-bicep.sh "$bicep_cli"
+
+          "$bicep_cli" build infra/migration-job.bicep \
+            --outfile "$RUNNER_TEMP/migration-job.json"
+          "$bicep_cli" build infra/apps.bicep \
+            --outfile "$RUNNER_TEMP/apps.json"
+          "$bicep_cli" build-params infra/environments/production.migration.bicepparam \
+            --outfile "$RUNNER_TEMP/production.migration.parameters.json"
+          "$bicep_cli" build-params infra/environments/production.apps.bicepparam \
+            --outfile "$RUNNER_TEMP/production.apps.parameters.json"
+
+      - name: Discover current production state
+        id: production-state
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          existing_apps=0
+          for app_name in "$API_APP" "$WEB_APP" "$WORKER_APP"; do
+            if az containerapp show \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$app_name" \
+              --output none \
+              --only-show-errors > /dev/null 2>&1
+            then
+              existing_apps=$((existing_apps + 1))
+            fi
+          done
+
+          if (( existing_apps == 0 )); then
+            echo "bootstrap=true" >> "$GITHUB_OUTPUT"
+            echo "Production has no existing application revisions; running the initial bootstrap."
+            exit 0
+          fi
+
+          if (( existing_apps != 3 )); then
+            echo "::error::Production is partially provisioned; API, Web, and Worker must all exist."
+            exit 1
+          fi
+
+          api_json="$(
+            az containerapp show \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$API_APP" \
+              --output json \
+              --only-show-errors
+          )"
+          web_json="$(
+            az containerapp show \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$WEB_APP" \
+              --output json \
+              --only-show-errors
+          )"
+          worker_json="$(
+            az containerapp show \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$WORKER_APP" \
+              --output json \
+              --only-show-errors
+          )"
+
+          api_mode="$(jq --raw-output '.properties.configuration.activeRevisionsMode // "" | ascii_downcase' <<< "$api_json")"
+          web_mode="$(jq --raw-output '.properties.configuration.activeRevisionsMode // "" | ascii_downcase' <<< "$web_json")"
+          worker_mode="$(jq --raw-output '.properties.configuration.activeRevisionsMode // "" | ascii_downcase' <<< "$worker_json")"
+
+          if [[ "$api_mode" != "multiple" || "$web_mode" != "multiple" || \
+                "$worker_mode" != "single" ]]
+          then
+            echo "::error::Production API/Web must use Multiple mode and Worker must use Single mode."
+            exit 1
+          fi
+
+          stable_api_revision="$(
+            jq --raw-output '
+              [.properties.configuration.ingress.traffic[]? |
+                select((.weight // 0) == 100 and (.revisionName // "") != "") |
+                .revisionName] |
+              if length == 1 then .[0] else "" end
+            ' <<< "$api_json"
+          )"
+          stable_web_revision="$(
+            jq --raw-output '
+              [.properties.configuration.ingress.traffic[]? |
+                select((.weight // 0) == 100 and (.revisionName // "") != "") |
+                .revisionName] |
+              if length == 1 then .[0] else "" end
+            ' <<< "$web_json"
+          )"
+          worker_revisions_json="$(
+            az containerapp revision list \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$WORKER_APP" \
+              --output json \
+              --only-show-errors
+          )"
+          stable_worker_revision="$(
+            jq --raw-output '
+              [.[] | select(.properties.active == true) | .name] |
+              if length == 1 then .[0] else "" end
+            ' <<< "$worker_revisions_json"
+          )"
+          latest_ready_worker_revision="$(
+            jq --raw-output '.properties.latestReadyRevisionName // ""' \
+              <<< "$worker_json"
+          )"
+          web_fqdn="$(jq --raw-output '.properties.configuration.ingress.fqdn // ""' <<< "$web_json")"
+
+          for discovered_value in \
+            "$stable_api_revision" \
+            "$stable_web_revision" \
+            "$stable_worker_revision" \
+            "$web_fqdn"
+          do
+            if [[ -z "$discovered_value" ]]; then
+              echo "::error::Production does not expose one unambiguous stable baseline."
+              exit 1
+            fi
+          done
+
+          if [[ "$stable_worker_revision" != "$latest_ready_worker_revision" ]]; then
+            echo "::error::The active Worker revision is not the latest ready revision."
+            exit 1
+          fi
+
+          if [[ "$stable_api_revision" == "$CANDIDATE_API_REVISION" || \
+                "$stable_web_revision" == "$CANDIDATE_WEB_REVISION" ]]
+          then
+            echo "::error::The selected release is already serving production traffic."
+            exit 1
+          fi
+
+          stable_api_image="$(
+            az containerapp revision show \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$API_APP" \
+              --revision "$stable_api_revision" \
+              --query properties.template.containers[0].image \
+              --output tsv \
+              --only-show-errors
+          )"
+          stable_web_image="$(
+            az containerapp revision show \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$WEB_APP" \
+              --revision "$stable_web_revision" \
+              --query properties.template.containers[0].image \
+              --output tsv \
+              --only-show-errors
+          )"
+          stable_worker_image="$(
+            az containerapp revision show \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$WORKER_APP" \
+              --revision "$stable_worker_revision" \
+              --query properties.template.containers[0].image \
+              --output tsv \
+              --only-show-errors
+          )"
+
+          for baseline_specification in \
+            "$API_APP|$stable_api_revision|$stable_api_image" \
+            "$WEB_APP|$stable_web_revision|$stable_web_image" \
+            "$WORKER_APP|$stable_worker_revision|$stable_worker_image"
+          do
+            IFS='|' read -r app_name revision_name expected_image \
+              <<< "$baseline_specification"
+            bash .github/scripts/wait-for-container-app-revision.sh \
+              "$AZURE_RESOURCE_GROUP" \
+              "$app_name" \
+              "$revision_name" \
+              "$expected_image" \
+              120
+          done
+
+          stable_api_tag="${stable_api_image##*:}"
+          stable_web_tag="${stable_web_image##*:}"
+          stable_worker_tag="${stable_worker_image##*:}"
+
+          if [[ ! "$stable_api_tag" =~ ^sha-[0-9a-f]{40}$ || \
+                "$stable_api_tag" != "$stable_web_tag" || \
+                "$stable_api_tag" != "$stable_worker_tag" ]]
+          then
+            echo "::error::Production baseline images must share one immutable Git SHA tag."
+            exit 1
+          fi
+
+          {
+            echo "STABLE_API_REVISION=${stable_api_revision}"
+            echo "STABLE_WEB_REVISION=${stable_web_revision}"
+            echo "STABLE_WORKER_REVISION=${stable_worker_revision}"
+            echo "STABLE_API_IMAGE=${stable_api_image}"
+            echo "STABLE_WEB_IMAGE=${stable_web_image}"
+            echo "STABLE_WORKER_IMAGE=${stable_worker_image}"
+            echo "PRODUCTION_WEB_URL=https://${web_fqdn}"
+          } >> "$GITHUB_ENV"
+
+          {
+            echo "bootstrap=false"
+            echo "stable_api_revision=${stable_api_revision}"
+            echo "stable_web_revision=${stable_web_revision}"
+            echo "stable_worker_revision=${stable_worker_revision}"
+            echo "stable_worker_image=${stable_worker_image}"
+            echo "web_url=https://${web_fqdn}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify current production baseline
+        if: steps.production-state.outputs.bootstrap == 'false'
+        shell: bash
+        env:
+          PRODUCTION_WEB_URL: ${{ steps.production-state.outputs.web_url }}
+        run: bash .github/scripts/production-smoke-test.sh "$PRODUCTION_WEB_URL" 20
+
+      - name: Deploy production migration job definition
+        id: deploy-migration-job
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          deployment_file="$RUNNER_TEMP/production-migration-deployment.json"
+          az deployment group create \
+            --name "migration-prod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --template-file "$RUNNER_TEMP/migration-job.json" \
+            --parameters "@$RUNNER_TEMP/production.migration.parameters.json" \
+            --mode Incremental \
+            --only-show-errors \
+            --output json > "$deployment_file"
+
+          migration_job_name="$(jq --raw-output '.properties.outputs.jobName.value' "$deployment_file")"
+          migration_image="$(jq --raw-output '.properties.outputs.imageReference.value' "$deployment_file")"
+
+          if [[ -z "$migration_job_name" || "$migration_job_name" == "null" ]]; then
+            echo "::error::Migration deployment did not return a job name."
+            exit 1
+          fi
+
+          if [[ "$migration_image" != "$API_IMAGE" ]]; then
+            echo "::error::Migration job does not reference the promoted API image."
+            exit 1
+          fi
+
+          echo "job_name=${migration_job_name}" >> "$GITHUB_OUTPUT"
+
+      - name: Apply backward-compatible EF Core migrations
+        shell: bash
+        env:
+          MIGRATION_JOB_NAME: ${{ steps.deploy-migration-job.outputs.job_name }}
+        run: |
+          set -euo pipefail
+
+          execution_name="$(
+            az containerapp job start \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$MIGRATION_JOB_NAME" \
+              --query name \
+              --output tsv \
+              --only-show-errors
+          )"
+
+          if [[ -z "$execution_name" ]]; then
+            echo "::error::Azure did not return a production migration execution name."
+            exit 1
+          fi
+
+          bash .github/scripts/wait-for-container-app-job.sh \
+            "$AZURE_RESOURCE_GROUP" \
+            "$MIGRATION_JOB_NAME" \
+            "$execution_name" \
+            1200
+
+      - name: Deploy zero-traffic candidate revisions
+        id: deploy-candidate
+        shell: bash
+        env:
+          BOOTSTRAP: ${{ steps.production-state.outputs.bootstrap }}
+        run: |
+          set -euo pipefail
+
+          deployment_file="$RUNNER_TEMP/production-apps-deployment.json"
+          deployment_parameters=(
+            "@$RUNNER_TEMP/production.apps.parameters.json"
+          )
+
+          if [[ "$BOOTSTRAP" == "true" ]]; then
+            deployment_parameters+=(deployWorker=true)
+          else
+            deployment_parameters+=(
+              "stableApiRevisionName=$STABLE_API_REVISION"
+              "stableWebRevisionName=$STABLE_WEB_REVISION"
+              deployWorker=false
+            )
+          fi
+
+          az deployment group create \
+            --name "apps-prod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --template-file "$RUNNER_TEMP/apps.json" \
+            --parameters "${deployment_parameters[@]}" \
+            --mode Incremental \
+            --only-show-errors \
+            --output json > "$deployment_file"
+
+          api_name="$(jq --raw-output '.properties.outputs.apiName.value' "$deployment_file")"
+          api_revision="$(jq --raw-output '.properties.outputs.apiRevisionName.value' "$deployment_file")"
+          api_image="$(jq --raw-output '.properties.outputs.apiImageReference.value' "$deployment_file")"
+          web_name="$(jq --raw-output '.properties.outputs.webName.value' "$deployment_file")"
+          web_revision="$(jq --raw-output '.properties.outputs.webRevisionName.value' "$deployment_file")"
+          web_image="$(jq --raw-output '.properties.outputs.webImageReference.value' "$deployment_file")"
+          web_fqdn="$(jq --raw-output '.properties.outputs.webFqdn.value' "$deployment_file")"
+          candidate_web_fqdn="$(jq --raw-output '.properties.outputs.candidateWebFqdn.value' "$deployment_file")"
+          worker_name="$(jq --raw-output '.properties.outputs.workerName.value' "$deployment_file")"
+          worker_image="$(jq --raw-output '.properties.outputs.workerImageReference.value' "$deployment_file")"
+          worker_revision="$(jq --raw-output '.properties.outputs.workerRevisionName.value' "$deployment_file")"
+
+          if [[ "$api_name" != "$API_APP" || "$api_revision" != "$CANDIDATE_API_REVISION" || \
+                "$api_image" != "$API_IMAGE" || "$web_name" != "$WEB_APP" || \
+                "$web_revision" != "$CANDIDATE_WEB_REVISION" || "$web_image" != "$WEB_IMAGE" || \
+                "$worker_name" != "$WORKER_APP" || \
+                "$worker_revision" != "$CANDIDATE_WORKER_REVISION" || \
+                "$worker_image" != "$WORKER_IMAGE" ]]
+          then
+            echo "::error::Candidate deployment outputs do not match the approved release."
+            exit 1
+          fi
+
+          for fqdn in "$web_fqdn" "$candidate_web_fqdn"; do
+            if [[ -z "$fqdn" || "$fqdn" == "null" ]]; then
+              echo "::error::Candidate deployment did not return a Web FQDN."
+              exit 1
+            fi
+          done
+
+          {
+            echo "web_url=https://${web_fqdn}"
+            echo "candidate_web_url=https://${candidate_web_fqdn}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify candidate revision readiness
+        shell: bash
+        env:
+          BOOTSTRAP: ${{ steps.production-state.outputs.bootstrap }}
+        run: |
+          set -euo pipefail
+
+          bash .github/scripts/wait-for-container-app-revision.sh \
+            "$AZURE_RESOURCE_GROUP" \
+            "$API_APP" \
+            "$CANDIDATE_API_REVISION" \
+            "$API_IMAGE" \
+            900
+          bash .github/scripts/wait-for-container-app-revision.sh \
+            "$AZURE_RESOURCE_GROUP" \
+            "$WEB_APP" \
+            "$CANDIDATE_WEB_REVISION" \
+            "$WEB_IMAGE" \
+            900
+
+          if [[ "$BOOTSTRAP" == "true" ]]; then
+            bash .github/scripts/wait-for-container-app-revision.sh \
+              "$AZURE_RESOURCE_GROUP" \
+              "$WORKER_APP" \
+              "$CANDIDATE_WORKER_REVISION" \
+              "$WORKER_IMAGE" \
+              900
+          else
+            bash .github/scripts/set-container-app-traffic.sh \
+              "$AZURE_RESOURCE_GROUP" \
+              "$API_APP" \
+              "$STABLE_API_REVISION" \
+              "$CANDIDATE_API_REVISION" \
+              0
+            bash .github/scripts/set-container-app-traffic.sh \
+              "$AZURE_RESOURCE_GROUP" \
+              "$WEB_APP" \
+              "$STABLE_WEB_REVISION" \
+              "$CANDIDATE_WEB_REVISION" \
+              0
+          fi
+
+      - name: Smoke test candidate endpoint
+        if: steps.production-state.outputs.bootstrap == 'false'
+        shell: bash
+        env:
+          CANDIDATE_WEB_URL: ${{ steps.deploy-candidate.outputs.candidate_web_url }}
+        run: bash .github/scripts/production-smoke-test.sh "$CANDIDATE_WEB_URL" 10
+
+      - name: Verify initial production bootstrap
+        if: steps.production-state.outputs.bootstrap == 'true'
+        shell: bash
+        env:
+          PRODUCTION_WEB_URL: ${{ steps.deploy-candidate.outputs.web_url }}
+        run: bash .github/scripts/production-smoke-test.sh "$PRODUCTION_WEB_URL" 20
+
+      - name: Shift production traffic progressively
+        if: steps.production-state.outputs.bootstrap == 'false'
+        shell: bash
+        env:
+          PRODUCTION_WEB_URL: ${{ steps.deploy-candidate.outputs.web_url }}
+        run: |
+          set -euo pipefail
+
+          for candidate_weight in 5 25 50 100; do
+            bash .github/scripts/set-container-app-traffic.sh \
+              "$AZURE_RESOURCE_GROUP" \
+              "$API_APP" \
+              "$STABLE_API_REVISION" \
+              "$CANDIDATE_API_REVISION" \
+              "$candidate_weight"
+            bash .github/scripts/set-container-app-traffic.sh \
+              "$AZURE_RESOURCE_GROUP" \
+              "$WEB_APP" \
+              "$STABLE_WEB_REVISION" \
+              "$CANDIDATE_WEB_REVISION" \
+              "$candidate_weight"
+
+            sleep "$OBSERVATION_SECONDS"
+
+            bash .github/scripts/wait-for-container-app-revision.sh \
+              "$AZURE_RESOURCE_GROUP" \
+              "$API_APP" \
+              "$CANDIDATE_API_REVISION" \
+              "$API_IMAGE" \
+              120
+            bash .github/scripts/wait-for-container-app-revision.sh \
+              "$AZURE_RESOURCE_GROUP" \
+              "$WEB_APP" \
+              "$CANDIDATE_WEB_REVISION" \
+              "$WEB_IMAGE" \
+              120
+            bash .github/scripts/production-smoke-test.sh "$PRODUCTION_WEB_URL" 20
+
+            echo "- ${candidate_weight}% candidate traffic: passed" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Update Worker after HTTP rollout
+        if: steps.production-state.outputs.bootstrap == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if revision_json="$(
+            az containerapp revision show \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$WORKER_APP" \
+              --revision "$CANDIDATE_WORKER_REVISION" \
+              --output json \
+              --only-show-errors 2> /dev/null
+          )"
+          then
+            candidate_worker_image="$(
+              jq --raw-output '.properties.template.containers[0].image // ""' \
+                <<< "$revision_json"
+            )"
+
+            if [[ "$candidate_worker_image" != "$WORKER_IMAGE" ]]; then
+              echo "::error::Existing candidate Worker revision references an unexpected image."
+              exit 1
+            fi
+
+            az containerapp revision activate \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$WORKER_APP" \
+              --revision "$CANDIDATE_WORKER_REVISION" \
+              --output none \
+              --only-show-errors
+          else
+            az containerapp update \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$WORKER_APP" \
+              --image "$WORKER_IMAGE" \
+              --revision-suffix "$CANDIDATE_SUFFIX" \
+              --output none \
+              --only-show-errors
+          fi
+
+          bash .github/scripts/wait-for-container-app-revision.sh \
+            "$AZURE_RESOURCE_GROUP" \
+            "$WORKER_APP" \
+            "$CANDIDATE_WORKER_REVISION" \
+            "$WORKER_IMAGE" \
+            900
+
+          mapfile -t active_worker_revisions < <(
+            az containerapp revision list \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$WORKER_APP" \
+              --query "[?properties.active].name" \
+              --output tsv \
+              --only-show-errors
+          )
+
+          for revision_name in "${active_worker_revisions[@]}"; do
+            if [[ "$revision_name" == "$CANDIDATE_WORKER_REVISION" ]]; then
+              continue
+            fi
+
+            az containerapp revision deactivate \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$WORKER_APP" \
+              --revision "$revision_name" \
+              --output none \
+              --only-show-errors
+          done
+
+      - name: Promote candidate revision labels
+        if: steps.production-state.outputs.bootstrap == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          bash .github/scripts/finalize-production-revisions.sh \
+            "$AZURE_RESOURCE_GROUP" \
+            "$API_APP" \
+            "$STABLE_API_REVISION" \
+            "$CANDIDATE_API_REVISION"
+          bash .github/scripts/finalize-production-revisions.sh \
+            "$AZURE_RESOURCE_GROUP" \
+            "$WEB_APP" \
+            "$STABLE_WEB_REVISION" \
+            "$CANDIDATE_WEB_REVISION"
+
+      - name: Verify final production state
+        shell: bash
+        env:
+          BOOTSTRAP: ${{ steps.production-state.outputs.bootstrap }}
+          PRODUCTION_WEB_URL: ${{ steps.deploy-candidate.outputs.web_url }}
+        run: |
+          set -euo pipefail
+
+          for app_specification in \
+            "$API_APP|$CANDIDATE_API_REVISION|$API_IMAGE" \
+            "$WEB_APP|$CANDIDATE_WEB_REVISION|$WEB_IMAGE" \
+            "$WORKER_APP|$CANDIDATE_WORKER_REVISION|$WORKER_IMAGE"
+          do
+            IFS='|' read -r app_name revision_name expected_image \
+              <<< "$app_specification"
+            bash .github/scripts/wait-for-container-app-revision.sh \
+              "$AZURE_RESOURCE_GROUP" \
+              "$app_name" \
+              "$revision_name" \
+              "$expected_image" \
+              120
+          done
+
+          active_worker_revisions="$(
+            az containerapp revision list \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$WORKER_APP" \
+              --output json \
+              --only-show-errors |
+              jq --arg expected "$CANDIDATE_WORKER_REVISION" '
+                [.[] | select(.properties.active == true) | .name] |
+                length == 1 and .[0] == $expected
+              '
+          )"
+
+          if [[ "$active_worker_revisions" != "true" ]]; then
+            echo "::error::Exactly one candidate Worker revision must be active."
+            exit 1
+          fi
+
+          if [[ "$BOOTSTRAP" == "true" ]]; then
+            for app_specification in \
+              "$API_APP|$CANDIDATE_API_REVISION" \
+              "$WEB_APP|$CANDIDATE_WEB_REVISION"
+            do
+              IFS='|' read -r app_name expected_revision \
+                <<< "$app_specification"
+              traffic_json="$(
+                az containerapp show \
+                  --resource-group "$AZURE_RESOURCE_GROUP" \
+                  --name "$app_name" \
+                  --query properties.configuration.ingress.traffic \
+                  --output json \
+                  --only-show-errors
+              )"
+              jq --exit-status \
+                --arg expected "$expected_revision" '
+                length == 1 and
+                .[0].weight == 100 and
+                .[0].label == "stable" and
+                .[0].revisionName == $expected
+              ' <<< "$traffic_json" > /dev/null
+            done
+          fi
+
+          bash .github/scripts/production-smoke-test.sh "$PRODUCTION_WEB_URL" 30
+
+      - name: Roll back production automatically
+        if: failure() && steps.production-state.outputs.bootstrap == 'false'
+        shell: bash
+        env:
+          PRODUCTION_WEB_URL: ${{ steps.production-state.outputs.web_url }}
+        run: |
+          bash .github/scripts/rollback-production.sh \
+            "$AZURE_RESOURCE_GROUP" \
+            "$API_APP" \
+            "$WEB_APP" \
+            "$WORKER_APP" \
+            "$STABLE_API_REVISION" \
+            "$CANDIDATE_API_REVISION" \
+            "$STABLE_WEB_REVISION" \
+            "$CANDIDATE_WEB_REVISION" \
+            "$STABLE_WORKER_IMAGE" \
+            "$ROLLBACK_SUFFIX" \
+            "$PRODUCTION_WEB_URL"
+
+          {
+            echo "## Automatic production rollback"
+            echo
+            echo "- Release: $CARLENS_RELEASE_SHA"
+            echo "- API and Web traffic: restored to previous stable revisions"
+            echo "- Worker: restored to previous stable image when required"
+            echo "- Post-rollback smoke test: passed"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Write production deployment summary
+        if: success()
+        shell: bash
+        env:
+          BOOTSTRAP: ${{ steps.production-state.outputs.bootstrap }}
+          PRODUCTION_WEB_URL: ${{ steps.deploy-candidate.outputs.web_url }}
+        run: |
+          deployment_mode="blue-green"
+          traffic_progression="5% -> 25% -> 50% -> 100%"
+
+          if [[ "$BOOTSTRAP" == "true" ]]; then
+            deployment_mode="initial bootstrap"
+            traffic_progression="initial 100% allocation"
+          fi
+
+          {
+            echo "## Production deployment"
+            echo
+            echo "- Release commit: $CARLENS_RELEASE_SHA"
+            echo "- Image tag: $CARLENS_IMAGE_TAG"
+            echo "- Deployment mode: ${deployment_mode}"
+            echo "- Traffic progression: ${traffic_progression}"
+            echo "- Migration: succeeded"
+            echo "- Worker rollout: succeeded"
+            echo "- Final smoke test: passed"
+            echo "- Production URL: $PRODUCTION_WEB_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove temporary deployment parameters
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP"/*.parameters.json
+
+      - name: Sign out from Azure
+        if: always()
+        shell: bash
+        run: az logout || true
