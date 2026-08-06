@@ -61,7 +61,7 @@ public sealed class OpenAiListingAnalysisService : IListingAnalysisAiService
                 $"OpenAI analysis request failed with status {(int)response.StatusCode}.");
         }
 
-        var outputText = ExtractOutputText(responseJson);
+        var outputText = OpenAiResponseJson.ExtractOutputText(responseJson);
 
         if (string.IsNullOrWhiteSpace(outputText))
         {
@@ -192,7 +192,8 @@ public sealed class OpenAiListingAnalysisService : IListingAnalysisAiService
                     name = "vehicle_analysis_report",
                     strict = true,
                     schema = CreateResponseSchema(
-                        carListing.InputType == ListingInputType.Manual)
+                        carListing.InputType == ListingInputType.Manual ||
+                        marketBenchmark is null)
                 }
             }
         };
@@ -398,9 +399,7 @@ public sealed class OpenAiListingAnalysisService : IListingAnalysisAiService
         if (marketBenchmark is null)
         {
             builder.AppendLine(
-                carListing.InputType == ListingInputType.Manual
-                    ? "- Canlı karşılaştırılabilir ilan bulunmuyor. Araç özelliklerinden yaklaşık piyasa değeri ve geniş bir fiyat bandı üret; fiyat güvenini düşük tut."
-                    : "- Yeterli karşılaştırılabilir ilan bulunamadı; fiyat güvenini düşük tut.");
+                "- Yeterli canlı karşılaştırılabilir ilan bulunmuyor. Araç özelliklerinden yaklaşık piyasa değeri ve geniş bir fiyat bandı üret; fiyat güvenini düşük tut ve bu belirsizliği açıkça belirt.");
         }
         else
         {
@@ -739,47 +738,6 @@ public sealed class OpenAiListingAnalysisService : IListingAnalysisAiService
             inputCost + outputCost,
             8,
             MidpointRounding.AwayFromZero);
-    }
-
-    private static string ExtractOutputText(string responseJson)
-    {
-        using var document = JsonDocument.Parse(responseJson);
-
-        if (document.RootElement.TryGetProperty(
-                "output_text",
-                out var outputTextElement) &&
-            outputTextElement.ValueKind == JsonValueKind.String)
-        {
-            return outputTextElement.GetString() ?? string.Empty;
-        }
-
-        if (!document.RootElement.TryGetProperty("output", out var outputElement) ||
-            outputElement.ValueKind != JsonValueKind.Array)
-        {
-            return string.Empty;
-        }
-
-        var builder = new StringBuilder();
-
-        foreach (var outputItem in outputElement.EnumerateArray())
-        {
-            if (!outputItem.TryGetProperty("content", out var contentElement) ||
-                contentElement.ValueKind != JsonValueKind.Array)
-            {
-                continue;
-            }
-
-            foreach (var contentItem in contentElement.EnumerateArray())
-            {
-                if (contentItem.TryGetProperty("text", out var textElement) &&
-                    textElement.ValueKind == JsonValueKind.String)
-                {
-                    builder.Append(textElement.GetString());
-                }
-            }
-        }
-
-        return builder.ToString();
     }
 
     private static string FormatMoney(decimal? value)

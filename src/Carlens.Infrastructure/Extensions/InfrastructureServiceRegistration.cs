@@ -38,7 +38,9 @@ public static class InfrastructureServiceRegistration
 
         services.Configure<ListingSourceOptions>(
             configuration.GetSection("ListingSource"));
-        services.AddSingleton<IListingSourceReader, ArabamComListingSourceReader>();
+        services.AddSingleton<IPrimaryListingSourceReader, ArabamComListingSourceReader>();
+        services.AddSingleton<IFallbackListingSourceReader, OpenAiWebListingSourceReader>();
+        services.AddSingleton<IListingSourceReader, ResilientListingSourceReader>();
 
         services.Configure<OpenAiOptions>(options =>
         {
@@ -69,6 +71,17 @@ public static class InfrastructureServiceRegistration
 
                 httpClient.BaseAddress = new Uri(options.BaseUrl);
                 httpClient.Timeout = TimeSpan.FromSeconds(90);
+            });
+        services.AddHttpClient(
+            OpenAiWebListingSourceReader.HttpClientName,
+            (serviceProvider, httpClient) =>
+            {
+                var options = serviceProvider
+                    .GetRequiredService<IOptions<OpenAiOptions>>()
+                    .Value;
+
+                httpClient.BaseAddress = new Uri(options.BaseUrl);
+                httpClient.Timeout = TimeSpan.FromSeconds(120);
             });
 
         return services;
