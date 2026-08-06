@@ -143,14 +143,14 @@ jobs:
                 select(.properties.template.containers[0].name == "api") |
                 .properties.configuration.ingress |
                 strings |
-                select(contains("apiTraffic"))
+                select(contains("apiTraffic") and test("external[^A-Za-z]+false\\(\\)"))
               ] | length) == 1 and
             ([.resources[] |
                 select(.type == "Microsoft.App/containerApps") |
                 select(.properties.template.containers[0].name == "web") |
                 .properties.configuration.ingress |
                 strings |
-                select(contains("webTraffic"))
+                select(contains("webTraffic") and test("external[^A-Za-z]+true\\(\\)"))
               ] | length) == 1
           ' artifacts/arm/apps.json > /dev/null
           jq --exit-status '
@@ -162,9 +162,6 @@ jobs:
             (.variables.webTraffic | contains("0")) and
             (.outputs.candidateWebFqdn.value | contains("---candidate"))
           ' artifacts/arm/apps.json > /dev/null
-          jq --exit-status \
-            '[.resources[] | select(.type == "Microsoft.App/containerApps" and .properties.configuration.ingress != null) | .properties.configuration.ingress.external] | sort == [false, true]' \
-            artifacts/arm/apps.json > /dev/null
           jq --exit-status \
             '[.resources[] | select(.type == "Microsoft.App/containerApps") | .properties.configuration.secrets[] | has("value")] | any | not' \
             artifacts/arm/apps.json > /dev/null
