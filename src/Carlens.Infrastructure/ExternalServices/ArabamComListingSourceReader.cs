@@ -11,7 +11,9 @@ using Microsoft.Playwright;
 
 namespace Carlens.Infrastructure.ExternalServices;
 
-public sealed class ArabamComListingSourceReader : IListingSourceReader, IAsyncDisposable
+public sealed class ArabamComListingSourceReader :
+    IPrimaryListingSourceReader,
+    IAsyncDisposable
 {
     private const string PageExtractionScript = """
         () => {
@@ -252,10 +254,21 @@ public sealed class ArabamComListingSourceReader : IListingSourceReader, IAsyncD
                     Timeout = _options.NavigationTimeoutSeconds * 1000
                 }).WaitAsync(cancellationToken);
 
-            if (response is null || !response.Ok)
+            if (response is null)
             {
                 throw new InvalidOperationException(
                     "İlan sayfasına erişilemedi veya sayfa geçerli bir cevap döndürmedi.");
+            }
+
+            if (!response.Ok)
+            {
+                if (IsSecurityChallenge(response))
+                {
+                    throw CreateBlockedException();
+                }
+
+                throw new InvalidOperationException(
+                    $"İlan sayfası geçerli bir cevap döndürmedi (HTTP {response.Status}).");
             }
 
             try
@@ -276,10 +289,9 @@ public sealed class ArabamComListingSourceReader : IListingSourceReader, IAsyncD
             {
                 var pageTitle = await page.TitleAsync().WaitAsync(cancellationToken);
 
-                if (pageTitle.Contains("Just a moment", StringComparison.OrdinalIgnoreCase))
+                if (IsSecurityChallengeTitle(pageTitle))
                 {
-                    throw new InvalidOperationException(
-                        "Arabam.com güvenlik doğrulaması ilan sayfasını okumayı engelledi.");
+                    throw CreateBlockedException();
                 }
 
                 throw new InvalidOperationException(
@@ -341,6 +353,26 @@ public sealed class ArabamComListingSourceReader : IListingSourceReader, IAsyncD
         {
             _browserInitializationLock.Release();
         }
+    }
+
+    private static bool IsSecurityChallenge(IResponse response)
+    {
+        return response.Status == 403 &&
+               response.Headers.Any(header =>
+                   header.Key.Equals("cf-mitigated", StringComparison.OrdinalIgnoreCase) &&
+                   header.Value.Equals("challenge", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsSecurityChallengeTitle(string title)
+    {
+        return title.Contains("Just a moment", StringComparison.OrdinalIgnoreCase) ||
+               title.Contains("Bir dakika lütfen", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static ListingSourceBlockedException CreateBlockedException()
+    {
+        return new ListingSourceBlockedException(
+            "Arabam.com güvenlik doğrulaması ilan sayfasının otomatik okunmasını engelledi.");
     }
 
     private ListingSourceData MapToSourceData(
