@@ -72,7 +72,7 @@ jobs:
 
       - name: Upload .NET test results
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: dotnet-test-results
           path: artifacts/test-results/**/*.trx
@@ -117,7 +117,7 @@ jobs:
 
       - name: Upload integration test results
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: integration-test-results
           path: artifacts/test-results/integration/*.trx
